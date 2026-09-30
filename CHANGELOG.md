@@ -1,15 +1,10 @@
 # DiPlay 0.2.8 — 2026-09-30
 
-- Steering-wheel next, previous and play/pause now reach CarPlay on BYD firmware that sends vendor key codes instead of standard Android media keys. DiPlay reads `KEYCODE_MEDIA_NEXT`, `KEYCODE_MEDIA_PREVIOUS`, `KEYCODE_MEDIA_PLAY_PAUSE`, `KEYCODE_HEADSETHOOK` and BYD's play/pause code 353; unrecognised codes are recorded once as `Wheel key discovery: …` in the diagnostic export so other firmware can be added later.
-- Long-press Siri is unchanged and still works alongside the media keys.
-- Connection loss recovers automatically in cases that previously needed an app restart: a timed-out control window, a failed teardown that left recovery stuck, and a scheduled retry that was quietly dropped.
-- A picture that freezes while the connection still looks healthy now reconnects instead of sitting frozen. An idle CarPlay home screen is not treated as a failure.
-- A short Wi-Fi blip is less likely to tear down the whole CarPlay session.
-- Music on slow head units no longer cuts and jumps ahead. Audio now runs at real-time priority ahead of video, holds a packet instead of losing it when the decoder is momentarily busy, and asks the Wi-Fi socket to keep a larger backlog so bursts after a radio gap are not dropped before the app sees them.
-- Music also costs less CPU per packet, which leaves more head-room for video on weak SoCs.
-- "Open after the car starts" now opens CarPlay itself instead of leaving DiPlay on its home page, understands the vendor quickboot broadcast some head units send instead of the standard boot one, and offers the "Display over other apps" permission that Android 10 or newer requires before a boot can open an app.
-- Media controls respond before the first track starts, not only after music is already playing.
-- Steering-wheel and recovery behaviour has not yet been re-verified on a car; please test and report.
+- Keep iPhone location reporting active across the wireless Bluetooth-to-Wi-Fi CarPlay handoff; limit location updates to one per second on wireless and USB.
+- Add optional ADB wheel-speed and gear reporting for iPhone dead reckoning when GPS is unavailable. Tunnel use has not yet been verified.
+- Add optional iOS 27 video playback on the car screen while parked, with iPhone, touchscreen and steering-wheel controls; close playback when leaving P.
+- Explain unsupported DRM-protected video such as Apple TV+, which requires a licensed FairPlay receiver.
+- Improve playback error reporting and preserve CarPlay when the head unit cannot play a video.
 
 # DiPlay 0.2.7 — 2026-09-29
 

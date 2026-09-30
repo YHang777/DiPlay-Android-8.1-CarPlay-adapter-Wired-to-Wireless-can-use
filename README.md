@@ -10,7 +10,7 @@
 
 ## 0.2.8 — public preview
 
-Install on the **car**, not the iPhone. No jailbreak, dongle, Mac, account or authentication server is required for use. Core CarPlay does not require ADB; the optional dashboard-mode and battery features do. Your head unit must permit APK installation. Wireless supports Wi-Fi Direct or the car’s existing hotspot; Wi-Fi Direct requires Android 10+; the APK supports Android 9+ for wired use.
+Install on the **car**, not the iPhone. No jailbreak, dongle, Mac, account or authentication server is required for use. Core CarPlay does not require ADB; optional dashboard, battery, wheel-speed and parked-video features do. Your head unit must permit APK installation. Wireless supports Wi-Fi Direct or the car’s existing hotspot; Wi-Fi Direct requires Android 10+; the APK supports Android 9+ for wired use.
 
 - Wired USB and wireless CarPlay with local authentication.
 - BYD HUD navigation with arrows, distance and street names on verified firmware.
@@ -22,23 +22,19 @@ Install on the **car**, not the iPhone. No jailbreak, dongle, Mac, account or au
 
 This is **not an Apple-certified product**. The APK bundles an experimental accessory identity recovered from public Carlinkit firmware, not a newly provisioned MFi identity for DiPlay. A bundled private key is extractable. Acceptance after future iOS updates, reliability across head units and suitability of that identity for general distribution are unresolved. This release invites community testing; it is not a guarantee of universal compatibility.
 
-Earlier releases were tested on the development DiLink5.1 car: live windshield guidance and street names work, Car hotspot now starts CarPlay, and Wi-Fi Direct performance is substantially improved. Occasional audio cutouts were seen on that car and are the target of the 0.2.8 music changes. The steering-wheel, automatic-reconnection, music and boot-start changes in 0.2.8 have not had an on-car test yet. Broader head-unit and iOS compatibility is not guaranteed. The HUD firmware scope and cleanup limits are documented in [BYD navigation](docs/BYD_NAVIGATION.md).
+Earlier releases were tested on the development DiLink5.1 car: live windshield guidance and street names work, Car hotspot now starts CarPlay, and Wi-Fi Direct performance is substantially improved. Occasional audio cutouts remain and are deferred to a later update. The new features were tested on a BYD Tang with DiLink 5.0 and an iPhone 15 Pro on iOS 27; wheel-speed dead reckoning in tunnels remains unverified. Broader head-unit and iOS compatibility is not guaranteed. The HUD firmware scope and cleanup limits are documented in [BYD navigation](docs/BYD_NAVIGATION.md).
 
 ## What’s new in 0.2.8
-
-- Steering-wheel next, previous and play/pause reach CarPlay on BYD firmware that sends vendor key codes; unrecognised codes are logged once for later support.
-- Automatic recovery after a drop, a frozen picture with a healthy-looking connection, and media controls before the first track starts.
-- Music on slower head units no longer cuts and jumps ahead: sound is scheduled ahead of video and no packet is thrown away when the decoder is briefly busy. The 500 ms music buffer is now a practical choice, not only the 1000 ms one.
-- “Open after the car starts” opens CarPlay itself instead of the DiPlay home page.
-
-## What’s new in 0.2.7
 
 - App interface in English, Simplified Chinese, Arabic, Russian and Spanish; synchronized Android app-language settings.
 - Steering-wheel media controls and long-press Siri on supported BYD firmware while CarPlay is on screen.
 - Dashboard display choices: map, turn card, or both; corrected dashboard keyframe recovery.
 - Optional ADB feature on supported DiLink 5.0: pause the dashboard map stream when its display mode hides the map.
 - Optional ADB battery reporting for Apple Maps, with warning threshold, charging-connector selection and a checked reconnect action.
-- Audio playback reliability fixes and clearer dashboard settings.
+- Wireless location reporting continues across the Bluetooth-to-Wi-Fi handoff; USB and wireless updates are limited to one per second.
+- Optional ADB wheel-speed and gear reporting lets iPhone navigation estimate movement when GPS is unavailable. Tunnel use still needs validation.
+- Optional iOS 27 video playback on the car screen while parked, with iPhone, touchscreen and steering-wheel controls. Playback closes when the car leaves P.
+- DRM-protected video such as Apple TV+ is not supported; DiPlay is not a licensed FairPlay receiver. Netflix does not support AirPlay.
 
 ## Documentation
 
