@@ -56,6 +56,7 @@ class DiPlayActivity : ComponentActivity() {
     private var lastRunning: Boolean? = null
     private var pendingWireless = false
     private var initialLaunch = true
+    private var autoConnectPosted = false
     private var notificationTransport = true
     private var exportInProgress = false
     private var navigationStreamType = 14
@@ -142,13 +143,21 @@ class DiPlayActivity : ComponentActivity() {
      * Starts the connection when the user asked DiPlay to, and always when boot brought the app up:
      * "open after the car starts" means CarPlay opens, not that DiPlay sits on its home page waiting
      * for the separate "connect when DiPlay opens" toggle.
+     *
+     * One shot per activity instance: a head unit can deliver both `BOOT_COMPLETED` and
+     * `QUICKBOOT_POWERON`, and the second delivery must not restart (or tear down) the session the
+     * first one just opened.
      */
     private fun maybeAutoConnect() {
         if (setupError != null || CarPlayBackgroundSession.hasSession()) return
         if (intent.getStringExtra("page") != null) return
         val fromBoot = intent.getBooleanExtra(EXTRA_AUTO_OPEN_CARPLAY, false)
+        if (fromBoot) intent.removeExtra(EXTRA_AUTO_OPEN_CARPLAY)
         if (!fromBoot && !DiPlayPreferences.autoConnect(this)) return
-        handler.post { connect(AirPlayPersistence.loadWirelessEnabled(this)) }
+        if (autoConnectPosted) return
+        autoConnectPosted = true
+        // Boot runs with nobody at the screen: never park on a dialog or a permission prompt.
+        handler.post { connect(AirPlayPersistence.loadWirelessEnabled(this), interactive = !fromBoot) }
     }
     override fun onPause() { handler.removeCallbacks(tick); super.onPause() }
 
@@ -839,23 +848,37 @@ class DiPlayActivity : ComponentActivity() {
         })
     }
 
-    private fun connect(wireless: Boolean) {
-        if (wireless && pendingCarHotspotSetup) { toast(getString(R.string.save_your_hotspot_details_in_connection_setup_first)); page = "connection"; render(); return }
-        if (setupError != null) { toast(setupError!!); return }
+    /**
+     * @param interactive false for the boot auto-open: nobody is at the screen, so gates that
+     * would raise a dialog or a permission prompt instead fail soft and leave the home page up.
+     */
+    private fun connect(wireless: Boolean, interactive: Boolean = true) {
+        if (wireless && pendingCarHotspotSetup) {
+            if (interactive) { toast(getString(R.string.save_your_hotspot_details_in_connection_setup_first)); page = "connection"; render() }
+            return
+        }
+        if (setupError != null) { if (interactive) toast(setupError!!); return }
         if (wireless && AirPlayPersistence.loadWirelessHotspotMode(this) == WirelessHotspotMode.MANUAL &&
             hotspotError(storedSsid(), storedPassword()) != null) {
             pendingCarHotspotSetup = true
-            page = "connection"
-            render()
-            toast(getString(R.string.save_the_name_and_password_from_the_car_s_hotspot_settings))
+            if (interactive) {
+                page = "connection"
+                render()
+                toast(getString(R.string.save_the_name_and_password_from_the_car_s_hotspot_settings))
+            }
             return
         }
-        if (wireless && carHotspotOff()) { carHotspotOffDialog(); return }
+        // The car hotspot can still be starting when boot fires; skip the dialog and let the
+        // connection attempt report its own status instead of blocking on nobody's answer.
+        if (wireless && carHotspotOff() && interactive) { carHotspotOffDialog(); return }
         if (wireless && DiPlayPreferences.phoneAddress(this) == null) {
+            if (!interactive) return
             pendingWireless = true; choosePhone(); return
         }
         val preferences = getSharedPreferences("diplay", MODE_PRIVATE)
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED && !preferences.getBoolean("notification_asked", false)) {
+        // Boot must not park on the notification-permission dialog; the next interactive connect
+        // asks instead, once someone is actually looking at the screen.
+        if (interactive && Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED && !preferences.getBoolean("notification_asked", false)) {
             preferences.edit().putBoolean("notification_asked", true).apply()
             notificationTransport = wireless
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)

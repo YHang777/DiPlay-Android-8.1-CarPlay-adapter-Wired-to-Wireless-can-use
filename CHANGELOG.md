@@ -1,5 +1,7 @@
 # DiPlay 0.2.8 — 2026-09-30
 
+- Fix the music "pause, then the song jumps ahead" cutout on weak head units: a packet the decoder cannot take yet is retried instead of dropped, and the audio and receive threads run at urgent-audio priority so video decode cannot starve them.
+- "Open after the car starts" now opens CarPlay itself after boot (including the vendor quickboot broadcast) instead of sitting on the home page; the settings page offers the overlay permission Android 10+ needs for that launch.
 - Keep iPhone location reporting active across the wireless Bluetooth-to-Wi-Fi CarPlay handoff; limit location updates to one per second on wireless and USB.
 - Add optional ADB wheel-speed and gear reporting for iPhone dead reckoning when GPS is unavailable. Tunnel use has not yet been verified.
 - Add optional iOS 27 video playback on the car screen while parked, with iPhone, touchscreen and steering-wheel controls; close playback when leaving P.

@@ -1113,7 +1113,13 @@ private class AudioRenderer(
             }
             return false
         }
-        val input = codec.getInputBuffer(index) ?: return false
+        val input = codec.getInputBuffer(index) ?: run {
+            // Never leak a dequeued slot: release it empty and drop this packet rather than
+            // retry forever with the buffer still held.
+            codec.queueInputBuffer(index, 0, 0, 0, 0)
+            inputDropped++
+            return true
+        }
         input.clear()
         return if (size <= input.remaining()) {
             input.put(payload, offset, size)
@@ -1279,7 +1285,8 @@ private class AudioRenderer(
             "estimatedQueuedFrames=${queuedFrames ?: -1} writeErrors=$writeErrorsThisWindow " +
             "lastWriteError=${lastWriteErrorCode ?: "none"} zeroWrites=$zeroWritesThisWindow " +
             "partialWrites=$partialWritesThisWindow " +
-            "decoderDroppedTotal=$inputDropped outputBuffersTotal=$outputBuffers rebuffers=$rebufferCount ended=$force"
+            "decoderDroppedTotal=$inputDropped decoderDeferralsTotal=$inputDeferred " +
+            "outputBuffersTotal=$outputBuffers rebuffers=$rebufferCount ended=$force"
         Log.i(STATS_TAG, line)
         report(line)
         statsLastUnderruns = underruns

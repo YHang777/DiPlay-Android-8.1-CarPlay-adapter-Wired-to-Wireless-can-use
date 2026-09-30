@@ -194,7 +194,8 @@ class AudioStream(
         socket.reuseAddress = true
         // A Wi-Fi gap delivers a whole backlog of RTP in one burst. The default socket buffer is
         // too small to hold it while this thread decrypts, which shows up as silent packet loss.
-        socket.receiveBufferSize = RECEIVE_BUFFER_BYTES
+        // Set before bind so the kernel allocates it up front; listen() logs what it actually got.
+        socket.receiveBufferSize = AUDIO_RECEIVE_BUFFER_BYTES
         socket.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
         return socket
     }

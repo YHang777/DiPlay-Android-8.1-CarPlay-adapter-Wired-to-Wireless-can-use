@@ -26,6 +26,8 @@ Earlier releases were tested on the development DiLink5.1 car: live windshield g
 
 ## What’s new in 0.2.8
 
+- Music no longer cuts and jumps ahead on weak head units: audio is held instead of dropped when the decoder is busy, and playback keeps urgent-audio priority.
+- “Open after the car starts” now opens CarPlay itself after boot instead of staying on the home page; Android 10+ needs “Display over other apps” for that launch to succeed.
 - App interface in English, Simplified Chinese, Arabic, Russian and Spanish; synchronized Android app-language settings.
 - Steering-wheel media controls and long-press Siri on supported BYD firmware while CarPlay is on screen.
 - Dashboard display choices: map, turn card, or both; corrected dashboard keyframe recovery.
