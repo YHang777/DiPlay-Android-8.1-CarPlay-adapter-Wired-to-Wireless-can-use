@@ -77,6 +77,13 @@ class AudioStream(
     }
 
     private fun runData(socket: DatagramSocket, listener: Listener) {
+        // Decryption runs here; if this thread loses the CPU to video decode the kernel UDP buffer
+        // overflows and the datagrams are gone before the app ever sees them.
+        try {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+        } catch (_: Exception) {
+            // Keep the default priority if the platform refuses.
+        }
         val stats = StreamReceiveStats("audio type=$streamType", onDiagnostic)
         val buffer = ByteArray(DATAGRAM_BYTES)
         try {
@@ -173,6 +180,9 @@ class AudioStream(
     private fun bindAnyPort(): DatagramSocket {
         val socket = DatagramSocket(null)
         socket.reuseAddress = true
+        // A Wi-Fi gap delivers a whole backlog of RTP in one burst. The default socket buffer is
+        // too small to hold it while this thread decrypts, which shows up as silent packet loss.
+        socket.receiveBufferSize = RECEIVE_BUFFER_BYTES
         socket.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
         return socket
     }
@@ -189,6 +199,9 @@ class AudioStream(
     private companion object {
         const val TAG = "xcertplay-usb"
         const val DATAGRAM_BYTES = 4_096
+        // The kernel clamps this to its own rmem limits, but a large request still lands well above
+        // the ~200 KB default — enough for several seconds of AAC RTP backlog after a radio gap.
+        const val RECEIVE_BUFFER_BYTES = 512 * 1024
         const val RTP_HEADER_LEN = 12
         const val TAG_LEN = 16
         const val NONCE_LEN = 8

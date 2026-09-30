@@ -117,19 +117,32 @@ object MediaCodecSupport {
 
     /** Wraps one raw AAC-LC access unit in an MPEG-4 ADTS frame. */
     fun adtsFrame(accessUnit: ByteArray, sampleRate: Int, channels: Int): ByteArray {
+        val frame = ByteArray(ADTS_HEADER_BYTES + accessUnit.size)
+        writeAdtsHeader(frame, accessUnit.size, sampleRate, channels)
+        accessUnit.copyInto(frame, ADTS_HEADER_BYTES)
+        return frame
+    }
+
+    /**
+     * Writes a 7-byte ADTS header at the start of [out] describing a frame of [payloadSize] bytes.
+     * The audio path frames RTP payloads in place through this so each packet does not pay for an
+     * intermediate copy just to gain a header — on weak SoCs those copies show up as GC pauses.
+     */
+    fun writeAdtsHeader(out: ByteArray, payloadSize: Int, sampleRate: Int, channels: Int) {
+        require(out.size >= ADTS_HEADER_BYTES + payloadSize) { "ADTS buffer too small" }
         val frequencyIndex = aacFrequencyIndex(sampleRate)
         val channelConfig = channels.coerceIn(1, 7)
-        val frameLength = accessUnit.size + 7
-        val header = ByteArray(7)
-        header[0] = 0xff.toByte()
-        header[1] = 0xf1.toByte()
-        header[2] = ((1 shl 6) or (frequencyIndex shl 2) or (channelConfig ushr 2)).toByte()
-        header[3] = (((channelConfig and 0x3) shl 6) or (frameLength ushr 11)).toByte()
-        header[4] = ((frameLength ushr 3) and 0xff).toByte()
-        header[5] = (((frameLength and 0x7) shl 5) or 0x1f).toByte()
-        header[6] = 0xfc.toByte()
-        return header + accessUnit
+        val frameLength = payloadSize + ADTS_HEADER_BYTES
+        out[0] = 0xff.toByte()
+        out[1] = 0xf1.toByte()
+        out[2] = ((1 shl 6) or (frequencyIndex shl 2) or (channelConfig ushr 2)).toByte()
+        out[3] = (((channelConfig and 0x3) shl 6) or (frameLength ushr 11)).toByte()
+        out[4] = ((frameLength ushr 3) and 0xff).toByte()
+        out[5] = (((frameLength and 0x7) shl 5) or 0x1f).toByte()
+        out[6] = 0xfc.toByte()
     }
+
+    const val ADTS_HEADER_BYTES = 7
 
     /** Extracts one RFC 3640 AAC access unit from an RTP payload. */
     fun aacAccessUnit(rtpPayload: ByteArray): ByteArray {

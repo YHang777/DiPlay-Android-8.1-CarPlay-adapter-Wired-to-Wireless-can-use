@@ -104,6 +104,7 @@
     <string name="audio_routing">Audio routing</string>
     <string name="auto">Auto</string>
     <string name="auto_start_on_boot">Auto-start on boot</string>
+    <string name="boot_auto_start_overlay_body">Android can stop DiPlay from opening itself after boot. Allow “Display over other apps” so CarPlay opens when the car starts, instead of staying on the home page.</string>
     <string name="automatic_cluster_map_setup">Automatic cluster map setup</string>
     <string name="automatic_connection">Automatic connection</string>
     <string name="automatic_map_enabled_open_the_cluster_map_card_or_select">Automatic map enabled. Open the cluster map card or select Map theme.</string>
@@ -178,6 +179,7 @@
     <string name="disconnect">Disconnect</string>
     <string name="discovering_iphone">Discovering iPhone</string>
     <string name="display_and_performance">Display and performance</string>
+    <string name="display_over_other_apps">Display over other apps</string>
     <string name="display_video">Display &amp; video</string>
     <string name="done">Done</string>
     <string name="drag_to_move_pinch_to_zoom">Drag to move, pinch to zoom</string>

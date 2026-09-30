@@ -37,6 +37,28 @@ class MediaCodecSupportTest {
     }
 
     @Test
+    fun adtsFramePinsTheHeaderLayout() {
+        // AAC-LC, 44.1 kHz (index 4), stereo, 4-byte payload: frame length 11.
+        assertArrayEquals(
+            byteArrayOf(
+                0xff.toByte(), 0xf1.toByte(), 0x50, 0x80.toByte(),
+                0x01, 0x7f, 0xfc.toByte(),
+                0x21, 0x10, 0x56, 0xe5.toByte(),
+            ),
+            MediaCodecSupport.adtsFrame(byteArrayOf(0x21, 0x10, 0x56, 0xe5.toByte()), 44_100, 2),
+        )
+    }
+
+    @Test
+    fun writeAdtsHeaderFramesInPlaceLikeAdtsFrame() {
+        val accessUnit = byteArrayOf(0x21, 0x10, 0x56, 0xe5.toByte())
+        val scratch = ByteArray(MediaCodecSupport.ADTS_HEADER_BYTES + accessUnit.size)
+        MediaCodecSupport.writeAdtsHeader(scratch, accessUnit.size, 44_100, 2)
+        accessUnit.copyInto(scratch, MediaCodecSupport.ADTS_HEADER_BYTES)
+        assertArrayEquals(MediaCodecSupport.adtsFrame(accessUnit, 44_100, 2), scratch)
+    }
+
+    @Test
     fun hevcCodecSpecificDataBuildsAnnexBParameterSets() {
         val vps = byteArrayOf(0x40, 0x01)
         val sps = byteArrayOf(0x42, 0x01, 0x02)

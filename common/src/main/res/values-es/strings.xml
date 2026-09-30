@@ -103,6 +103,7 @@
     <string name="audio_routing">Enrutamiento de audio</string>
     <string name="auto">Auto</string>
     <string name="auto_start_on_boot">Inicio automático al arrancar</string>
+    <string name="boot_auto_start_overlay_body">Android puede impedir que DiPlay se abra solo tras el arranque. Permite «Mostrar sobre otras aplicaciones» para que CarPlay se abra al arrancar el coche, en lugar de quedarse en la pantalla de inicio.</string>
     <string name="automatic_cluster_map_setup">Configuración automática del mapa del cuadro</string>
     <string name="automatic_connection">Conexión automática</string>
     <string name="automatic_map_enabled_open_the_cluster_map_card_or_select">Mapa automático activado. Abre la tarjeta del mapa del cuadro o selecciona el tema del mapa.</string>
@@ -175,6 +176,7 @@
     <string name="disconnect">Desconectar</string>
     <string name="discovering_iphone">Buscando iPhone</string>
     <string name="display_and_performance">Pantalla y rendimiento</string>
+    <string name="display_over_other_apps">Mostrar sobre otras aplicaciones</string>
     <string name="display_video">Pantalla y vídeo</string>
     <string name="done">Listo</string>
     <string name="drag_to_move_pinch_to_zoom">Arrastra para mover, pellizca para ampliar</string>

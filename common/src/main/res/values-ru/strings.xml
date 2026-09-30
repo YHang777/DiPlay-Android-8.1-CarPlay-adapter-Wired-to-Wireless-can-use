@@ -103,6 +103,7 @@
     <string name="audio_routing">Маршрутизация звука</string>
     <string name="auto">Авто</string>
     <string name="auto_start_on_boot">Автозапуск при загрузке</string>
+    <string name="boot_auto_start_overlay_body">Android может не позволить DiPlay открываться самостоятельно после загрузки. Разрешите «Показывать поверх других приложений», чтобы CarPlay открывался при запуске автомобиля, а не оставался на главном экране.</string>
     <string name="automatic_cluster_map_setup">Автоматическая настройка карты комбинации</string>
     <string name="automatic_connection">Автоматическое подключение</string>
     <string name="automatic_map_enabled_open_the_cluster_map_card_or_select">Автоматическая карта включена. Откройте карточку карты комбинации или выберите тему карты.</string>
@@ -175,6 +176,7 @@
     <string name="disconnect">Отключить</string>
     <string name="discovering_iphone">Поиск iPhone</string>
     <string name="display_and_performance">Экран и производительность</string>
+    <string name="display_over_other_apps">Показывать поверх других приложений</string>
     <string name="display_video">Экран и видео</string>
     <string name="done">Готово</string>
     <string name="drag_to_move_pinch_to_zoom">Перетаскивайте для перемещения, щипайте для масштабирования</string>

@@ -23,7 +23,9 @@ See [BYD navigation](BYD_NAVIGATION.md) for the exact verified firmware and life
 - A radio that supports joining a 5 GHz network may still reject a 5 GHz Wi-Fi Direct group. The capability flag is diagnostic, not proof of group-owner support.
 - Automatic startup depends on the car's firmware and startup permissions.
 - USB requires a data port and correct host/device-role behavior.
-- Calls, Siri, background reconnection, long journeys and future iOS releases need broader testing.
+- Steering-wheel media keys are read directly rather than through Android's media-key routing, which drops BYD's vendor codes. DiPlay listens for `KEYCODE_MEDIA_NEXT`, `KEYCODE_MEDIA_PREVIOUS`, `KEYCODE_MEDIA_PLAY_PAUSE`, `KEYCODE_HEADSETHOOK` and BYD play/pause code 353. If a wheel button does nothing, export a diagnostic and look for `Wheel key discovery: unrecognized keyCode=… scanCode=…` — that line is how other firmware codes get added.
+- Automatic reconnection covers a dropped link, a timed-out control window and a frozen screen stream. It does not cover a car Wi-Fi group that another app has taken over; use the Wi-Fi reset action for that. Recovery after a drop needs broader on-car testing.
+- Calls, Siri, long journeys and future iOS releases need broader testing.
 
 Reports record requested and actual frequencies, station association state, fallback failures and remembered-configuration events. Wi-Fi credentials and protocol payloads are excluded. A successful hotspot is not itself a successful CarPlay session.
 

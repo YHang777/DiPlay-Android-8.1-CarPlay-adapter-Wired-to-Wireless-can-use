@@ -76,6 +76,7 @@ import com.shilapi.xcertplay.orchestration.CarPlayTransport
 import com.shilapi.xcertplay.orchestration.ManualHotspotBand
 import com.shilapi.xcertplay.orchestration.ManualHotspotSecurity
 import com.shilapi.xcertplay.orchestration.MfiTarget
+import com.shilapi.xcertplay.orchestration.StreamStallWatchdog
 import com.shilapi.xcertplay.orchestration.WirelessHotspotMode
 import com.shilapi.xcertplay.orchestration.isManualHotspotChannelCompatible
 import com.shilapi.xcertplay.transport.Iap2IdentificationConfig
@@ -345,6 +346,15 @@ class CarPlayHostActivity : ComponentActivity() {
         val size = pendingDisplaySize ?: return@Runnable
         pendingDisplaySize = null
         applyDisplaySize(size)
+    }
+    private var stallWatchdog: StreamStallWatchdog? = null
+    private val stallCheck = object : Runnable {
+        override fun run() {
+            if (shuttingDown.get()) return
+            // check() reports each stalled stream through the watchdog's own callback.
+            stallWatchdog?.check()
+            mainHandler.postDelayed(this, STALL_CHECK_INTERVAL_MILLIS)
+        }
     }
 
     private val textureListener = object : TextureView.SurfaceTextureListener {
@@ -725,14 +735,25 @@ class CarPlayHostActivity : ComponentActivity() {
         }
     }
 
-    // The steering-wheel voice key reaches the focused window; while CarPlay is on screen it opens Siri.
+    // The steering-wheel voice and media keys reach the focused window; while CarPlay is on screen
+    // they drive the iPhone. Hardware keys are decided by [wheelKeyOutcome] rather than through a
+    // MediaSession: Android only routes recognized KEYCODE_MEDIA_* codes to a session, so BYD's
+    // vendor codes (play/pause is 353) never arrive at a MediaSession.Callback.
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (!CarPlayMediaButton.opensSiri(event.keyCode)) return super.dispatchKeyEvent(event)
-        if (event.action == KeyEvent.ACTION_UP) {
+        val outcome = wheelKeyOutcome(event.keyCode, event.action, event.repeatCount)
+        if (outcome.siri) {
             val sent = controller?.requestSiri() == true
             appendLog("Siri: voice key ${event.keyCode} sent=$sent")
         }
-        return true
+        outcome.mediaIndex?.let { index ->
+            val sent = controller?.sendMediaButton(index) == true
+            appendLog("Wheel key ${event.keyCode} -> CarPlay $index sent=$sent")
+        }
+        outcome.unknownKeyCode?.let { keyCode ->
+            // scanCode disambiguates vendor codes that share a keyCode across DiLink versions.
+            appendLog("Wheel key discovery: unrecognized keyCode=$keyCode scanCode=${event.scanCode}")
+        }
+        return if (outcome.consume) true else super.dispatchKeyEvent(event)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -766,6 +787,8 @@ class CarPlayHostActivity : ComponentActivity() {
         dismissClusterPresentation()
         mainHandler.removeCallbacks(applyDisplaySize)
         mainHandler.removeCallbacks(expireOldLogLines)
+        mainHandler.removeCallbacks(stallCheck)
+        stallWatchdog = null
         currentSurface?.let { surface ->
             sink?.clearSurface(SCREEN_TYPE_MAIN, surface)
             sink?.clearSurface(SCREEN_TYPE_ALT, surface)
@@ -2949,7 +2972,7 @@ class CarPlayHostActivity : ComponentActivity() {
     ): AndroidMediaSink {
         // Capture this session's log: late decoder shutdown must not write into a new session.
         val diagnosticLog = sessionLog
-        return AndroidMediaSink(
+        val sink = AndroidMediaSink(
             surface = null,
             videoWidth = videoWidth,
             videoHeight = videoHeight,
@@ -2965,6 +2988,16 @@ class CarPlayHostActivity : ComponentActivity() {
             },
             onMediaAudioChanged = CarPlayMediaKeys::onMediaAudioChanged,
         )
+        stallWatchdog = StreamStallWatchdog(
+            lastFrameNanos = sink::lastVideoFrameNanos,
+            onStalled = { type ->
+                appendLog("Screen stream $type stopped updating; reconnecting")
+                reconnectAfterLoss("Screen stream $type stalled")
+            },
+        )
+        mainHandler.removeCallbacks(stallCheck)
+        mainHandler.postDelayed(stallCheck, STALL_CHECK_INTERVAL_MILLIS)
+        return sink
     }
 
     private fun createMediaEngine(sink: AndroidMediaSink): CarPlayMediaEngine =
@@ -3047,6 +3080,9 @@ class CarPlayHostActivity : ComponentActivity() {
                     wifiRecoveryButton?.visibility = View.GONE
                     reconnectAfterLoss(description)
                 }
+                // A control loop that just ends (its timeout expired) is a lost session like any
+                // other. Without this the app sits on "control window ended" until it is restarted.
+                CarPlayStatus.ControlEnded -> reconnectAfterLoss(description)
                 else -> Unit
             }
         }
@@ -3075,6 +3111,9 @@ class CarPlayHostActivity : ComponentActivity() {
             createSessionListener(generation),
             createStatusReporter(generation),
         )
+        // The activity is new but the controller is not: without this the MediaSession, playback
+        // listener, and audio-focus wiring are gone until the next full restart.
+        CarPlayMediaKeys.attach(this, snapshot.controller)
         snapshot.sink.setScreenStreamActiveChangedListener { type, active ->
             onScreenStreamStateChanged(restartGeneration, type, active)
         }
@@ -3282,12 +3321,18 @@ class CarPlayHostActivity : ComponentActivity() {
         mainHandler.postDelayed(
             {
                 reconnectScheduled = false
-                if (
-                    shuttingDown.get() ||
-                    menuOpen ||
-                    handshakeResetInProgress ||
-                    generation != restartGeneration
-                ) {
+                if (shuttingDown.get() || menuOpen) return@postDelayed
+                if (generation != restartGeneration) {
+                    // Something else already rebuilt the stack while this was waiting. Drop the
+                    // stale attempt rather than restarting over a fresh one, but do not go silent:
+                    // if that rebuild then failed there would be nothing left to try again.
+                    if (controller == null && !handshakeResetInProgress) {
+                        reconnectAfterLoss("Reconnect superseded by a restart")
+                    }
+                    return@postDelayed
+                }
+                if (handshakeResetInProgress) {
+                    // A restart is mid-teardown; it will start the new stack itself.
                     return@postDelayed
                 }
                 restartCarPlay("Reconnecting after $reason")
@@ -3300,7 +3345,14 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun restartCarPlay(reason: String) {
         if (!CarPlayBackgroundSession.isOwner(this)) return
         if (shuttingDown.get() || menuOpen || handshakeResetInProgress) return
-        val size = activeDisplaySize ?: return
+        val size = activeDisplaySize
+        if (size == null) {
+            // Returning here would swallow the reconnect: the caller already cleared its scheduled
+            // retry, so nothing else would try again. Keep the recovery path alive instead.
+            appendLog("$reason; display size unknown, retrying")
+            mainHandler.postDelayed({ maybeStartCarPlay() }, 500)
+            return
+        }
         appendLog(reason)
         activeScreenStreamTypes.clear()
         setConnectionStage(reason)
@@ -3313,16 +3365,32 @@ class CarPlayHostActivity : ComponentActivity() {
         CarPlayBackgroundSession.clear(oldController, keepOwner = true)
         controller = null
         sink = null
+        // The watchdog watches this stack's sink; a dead stack must not report stalls into the
+        // reconnect path while the next one is still coming up.
+        stallWatchdog = null
+        mainHandler.removeCallbacks(stallCheck)
         teardownExecutor.execute {
-            oldController?.close()
-            oldController?.awaitClosed(CONTROLLER_CLOSE_TIMEOUT_MILLIS)
-            oldSink?.close()
-            runOnUiThread {
-                if (!shuttingDown.get() && generation == restartGeneration) {
-                    handshakeResetInProgress = false
-                    startCarPlay(size)
-                }
-            }
+            // A throw here must not leave handshakeResetInProgress latched: every later reconnect
+            // early-returns on it, so a stuck flag is a permanent dead state until the app restarts.
+            teardownCarPlayStack(
+                closeController = { oldController?.close() },
+                awaitControllerClosed = { oldController?.awaitClosed(CONTROLLER_CLOSE_TIMEOUT_MILLIS) },
+                closeSink = { oldSink?.close() },
+                reportFailure = { message, error -> Log.w(TAG, message, error) },
+                onComplete = {
+                    runOnUiThread {
+                        // Clear the flag even when a newer restart owns the generation: whoever is
+                        // running now needs it gone to be able to start or retry at all.
+                        handshakeResetInProgress = false
+                        if (shuttingDown.get()) return@runOnUiThread
+                        if (generation == restartGeneration) {
+                            startCarPlay(size)
+                        } else if (controller == null) {
+                            maybeStartCarPlay()
+                        }
+                    }
+                },
+            )
         }
     }
 
@@ -3381,6 +3449,8 @@ class CarPlayHostActivity : ComponentActivity() {
         if (!shuttingDown.compareAndSet(false, true)) { completion(); return }
         restartGeneration += 1
         mainHandler.removeCallbacks(applyDisplaySize)
+        mainHandler.removeCallbacks(stallCheck)
+        stallWatchdog = null
         val oldController = controller
         val oldSink = sink
         CarPlayMediaKeys.detach(oldController)
@@ -3494,6 +3564,7 @@ class CarPlayHostActivity : ComponentActivity() {
             } else {
                 activeScreenStreamTypes.remove(type)
             }
+            stallWatchdog?.onStreamActive(type, active)
             if (type == SCREEN_TYPE_ALT) {
                 Log.i(ClusterMapPresentation.TAG, "cluster stream active=$active")
                 appendLog("Cluster map: stream active=$active")
@@ -3640,6 +3711,12 @@ class CarPlayHostActivity : ComponentActivity() {
         const val SCREEN_TYPE_ALT = 111
         const val LOG_RETENTION_MILLIS = 5 * 60_000L
         const val DISPLAY_CHANGE_DEBOUNCE_MILLIS = 500L
+
+        /**
+         * How often an active screen stream is asked whether it has produced a frame lately. Short
+         * enough to notice a freeze while driving, long enough that the check itself is free.
+         */
+        const val STALL_CHECK_INTERVAL_MILLIS = 5_000L
         const val RECONNECT_DELAY_MILLIS = 2_000L
         const val IAP_TUNNEL_RECONNECT_DELAY_MILLIS = 15_000L
         const val CONTROLLER_CLOSE_TIMEOUT_MILLIS = 4_000L

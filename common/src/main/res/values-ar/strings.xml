@@ -103,6 +103,7 @@
     <string name="audio_routing">توجيه الصوت</string>
     <string name="auto">تلقائي</string>
     <string name="auto_start_on_boot">التشغيل التلقائي عند الإقلاع</string>
+    <string name="boot_auto_start_overlay_body">قد يمنع أندرويد DiPlay من الفتح تلقائيًا بعد الإقلاع. اسمح بـ «العرض فوق التطبيقات الأخرى» حتى يفتح CarPlay عند تشغيل السيارة، بدل البقاء على الصفحة الرئيسية.</string>
     <string name="automatic_cluster_map_setup">إعداد خريطة المجموعة التلقائي</string>
     <string name="automatic_connection">اتصال تلقائي</string>
     <string name="automatic_map_enabled_open_the_cluster_map_card_or_select">تم تفعيل الخريطة التلقائية. افتح بطاقة خريطة المجموعة أو اختر سمة الخريطة.</string>
@@ -175,6 +176,7 @@
     <string name="disconnect">قطع الاتصال</string>
     <string name="discovering_iphone">جارٍ اكتشاف iPhone</string>
     <string name="display_and_performance">العرض والأداء</string>
+    <string name="display_over_other_apps">العرض فوق التطبيقات الأخرى</string>
     <string name="display_video">العرض والفيديو</string>
     <string name="done">تم</string>
     <string name="drag_to_move_pinch_to_zoom">اسحب للتحريك، وقرّب للتكبير</string>

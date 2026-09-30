@@ -113,6 +113,7 @@ class DiPlayActivity : ComponentActivity() {
         super.onNewIntent(intent); setIntent(intent)
         page = intent.getStringExtra("page") ?: "home"; render()
         handleWirelessRecovery()
+        maybeAutoConnect()
     }
     override fun onSaveInstanceState(outState: Bundle) { outState.putString("page", page); outState.putBoolean("pending_car_hotspot", pendingCarHotspotSetup); super.onSaveInstanceState(outState) }
     override fun onConfigurationChanged(newConfig: Configuration) { super.onConfigurationChanged(newConfig); render() }
@@ -127,11 +128,21 @@ class DiPlayActivity : ComponentActivity() {
         if (!initialLaunch && (page == "home" || page == "settings" || page == "connection")) render()
         if (initialLaunch) {
             initialLaunch = false
-            if (setupError == null && !CarPlayBackgroundSession.hasSession() &&
-                DiPlayPreferences.autoConnect(this) && intent.getStringExtra("page") == null) {
-                handler.post { connect(AirPlayPersistence.loadWirelessEnabled(this)) }
-            }
+            maybeAutoConnect()
         }
+    }
+
+    /**
+     * Starts the connection when the user asked DiPlay to, and always when boot brought the app up:
+     * "open after the car starts" means CarPlay opens, not that DiPlay sits on its home page waiting
+     * for the separate "connect when DiPlay opens" toggle.
+     */
+    private fun maybeAutoConnect() {
+        if (setupError != null || CarPlayBackgroundSession.hasSession()) return
+        if (intent.getStringExtra("page") != null) return
+        val fromBoot = intent.getBooleanExtra(EXTRA_AUTO_OPEN_CARPLAY, false)
+        if (!fromBoot && !DiPlayPreferences.autoConnect(this)) return
+        handler.post { connect(AirPlayPersistence.loadWirelessEnabled(this)) }
     }
     override fun onPause() { handler.removeCallbacks(tick); super.onPause() }
 
@@ -250,7 +261,10 @@ class DiPlayActivity : ComponentActivity() {
         }
         section(content, getString(R.string.automatic_connection), R.drawable.ic_dp_automation) { card ->
             toggle(card, getString(R.string.connect_when_diplay_opens), getString(R.string.use_your_last_connection_type_and_selected_iphone), DiPlayPreferences.autoConnect(this)) { DiPlayPreferences.saveAutoConnect(this, it) }
-            toggle(card, getString(R.string.open_after_the_car_starts), getString(R.string.availability_depends_on_your_head_unit_s_startup_settings), AirPlayPersistence.loadAutoStartOnBoot(this)) { AirPlayPersistence.saveAutoStartOnBoot(this, it) }
+            toggle(card, getString(R.string.open_after_the_car_starts), getString(R.string.availability_depends_on_your_head_unit_s_startup_settings), AirPlayPersistence.loadAutoStartOnBoot(this)) { enabled ->
+                AirPlayPersistence.saveAutoStartOnBoot(this, enabled)
+                if (enabled) offerBootOverlayPermission()
+            }
             card.addView(button("${getString(R.string.choose_iphone_prefix)}${DiPlayPreferences.phoneName(this)}", false) { choosePhone() }, matchButton(12, 60))
         }
         section(content, getString(R.string.display_and_performance), R.drawable.ic_dp_display) { card ->
@@ -951,6 +965,23 @@ class DiPlayActivity : ComponentActivity() {
             openSystem(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
         }.setNegativeButton(getString(R.string.later), null).show()
     }
+
+    /**
+     * Android 10+ blocks background activity starts, so boot auto-start is silently a no-op
+     * without an exemption. The overlay permission is the one a user can grant; offer it when the
+     * option is switched on rather than leaving the feature dead on modern head units.
+     */
+    private fun offerBootOverlayPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || Settings.canDrawOverlays(this)) return
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.open_after_the_car_starts))
+            .setMessage(getString(R.string.boot_auto_start_overlay_body))
+            .setPositiveButton(getString(R.string.display_over_other_apps)) { _, _ ->
+                openSystem(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            }
+            .setNegativeButton(getString(R.string.later), null)
+            .show()
+    }
     private fun openSystem(intent: Intent) { runCatching { startActivity(intent) }.onFailure { toast(getString(R.string.open_this_setting_from_your_car_s_settings_app)) } }
     private fun toast(message: String) { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
 
@@ -1107,6 +1138,8 @@ class DiPlayActivity : ComponentActivity() {
     private fun space(height: Int) = View(this).apply { layoutParams = LinearLayout.LayoutParams(1, dp(height)) }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
     companion object {
+        /** Boot launch: open CarPlay directly instead of waiting on the home page. */
+        const val EXTRA_AUTO_OPEN_CARPLAY = "com.shilapi.xcertplay.AUTO_OPEN_CARPLAY"
         private val BG = Color.rgb(12, 17, 27)
         private val SURFACE = Color.rgb(21, 30, 44)
         private val BORDER = Color.rgb(42, 56, 75)

@@ -37,6 +37,29 @@ class CarPlayMediaButtonTest {
     }
 
     @Test
+    fun mediaAndVolumeAreClassified() {
+        assertTrue(CarPlayMediaButton.isMediaKey(KeyEvent.KEYCODE_MEDIA_NEXT))
+        assertTrue(CarPlayMediaButton.isMediaKey(CarPlayMediaButton.KEYCODE_BYD_AUTO_MEDIA_PLAY_PAUSE))
+        assertFalse(CarPlayMediaButton.isMediaKey(KeyEvent.KEYCODE_VOLUME_UP))
+        assertFalse(CarPlayMediaButton.isMediaKey(CarPlayMediaButton.KEYCODE_BYD_AUTO_MEDIA_VOICE))
+
+        assertTrue(CarPlayMediaButton.isVolumeKey(KeyEvent.KEYCODE_VOLUME_UP))
+        assertTrue(CarPlayMediaButton.isVolumeKey(KeyEvent.KEYCODE_VOLUME_DOWN))
+        assertFalse(CarPlayMediaButton.isVolumeKey(KeyEvent.KEYCODE_MEDIA_NEXT))
+    }
+
+    @Test
+    fun unknownKeysAreLoggedOnceAndKnownKeysNeverAre() {
+        // A vendor code no firmware mapping covers yet; each code is recorded at most once.
+        val vendor = 901
+        assertTrue(CarPlayMediaButton.shouldLogUnknownKey(vendor))
+        assertFalse(CarPlayMediaButton.shouldLogUnknownKey(vendor))
+
+        assertFalse(CarPlayMediaButton.shouldLogUnknownKey(KeyEvent.KEYCODE_MEDIA_NEXT))
+        assertFalse(CarPlayMediaButton.shouldLogUnknownKey(KeyEvent.KEYCODE_VOLUME_UP))
+    }
+
+    @Test
     fun indicesMatchTheAdvertisedMediaHidReport() {
         // Media report usages: 0 none, 1 play, 2 pause, 3 play/pause, 4 next, 5 previous.
         assertEquals(3, CarPlayMediaButton.PLAY_PAUSE)

@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay.airplay
 
 import android.view.KeyEvent
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Hardware media keys → CarPlay media HID presses (indices into [AirPlayHid]'s media report).
@@ -23,6 +24,8 @@ object CarPlayMediaButton {
     const val KEYCODE_BYD_AUTO_MEDIA_VOICE = 304
     const val KEYCODE_BYD_AUTO_MEDIA_VOICE_LONG = 312
 
+    private val unknownKeysSeen = ConcurrentHashMap.newKeySet<Int>()
+
     /**
      * Whether [keyCode] is a voice key that opens Siri. The BYD wheel sends each press as an
      * instant down/up pair, so a long press arrives as its own key rather than as a held one.
@@ -41,4 +44,30 @@ object CarPlayMediaButton {
         KEYCODE_BYD_AUTO_MEDIA_PLAY_PAUSE -> PLAY_PAUSE
         else -> null
     }
+
+    /** Whether [keyCode] is a media key DiPlay forwards to CarPlay. */
+    fun isMediaKey(keyCode: Int): Boolean = forKeyCode(keyCode) != null
+
+    /**
+     * Whether the volume rocker should stay with the system. Volume is never a CarPlay media press
+     * and must keep changing the car's own volume, so DiPlay neither forwards nor logs it.
+     */
+    fun isVolumeKey(keyCode: Int): Boolean = keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+        keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
+        keyCode == KeyEvent.KEYCODE_VOLUME_MUTE ||
+        keyCode == KeyEvent.KEYCODE_MUTE
+
+    /**
+     * True the first time a key that is not a known media or volume key is seen.
+     *
+     * BYD firmware sends vendor key codes that vary by head unit; only the play/pause code is
+     * documented. Logging each unknown code once records what a given firmware actually sends so
+     * the mapping can be completed from a diagnostic export, without flooding the session log.
+     */
+    fun shouldLogUnknownKey(keyCode: Int): Boolean =
+        if (isMediaKey(keyCode) || isVolumeKey(keyCode)) {
+            false
+        } else {
+            unknownKeysSeen.add(keyCode)
+        }
 }

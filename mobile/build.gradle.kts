@@ -1,11 +1,22 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
 
 // Optional local-only input. CI and ordinary source builds contain no accessory identity.
-val localAuthenticationAssets = providers.environmentVariable("DIPLAY_AUTH_ASSETS_DIR")
-    .orNull?.let { file(it).canonicalFile }
+// Android Studio Run does not pass environment variables, so the same path may be given as
+// `diplayAuthAssetsDir=` in the gitignored local.properties (like sdk.dir). Either input is
+// explicit and machine-local; without one the build stays identity-free.
+val localAuthenticationAssets = run {
+    val fromEnvironment = providers.environmentVariable("DIPLAY_AUTH_ASSETS_DIR").orNull
+    val localProperties = rootProject.file("local.properties")
+    val fromLocalProperties = localProperties.takeIf { it.isFile }?.inputStream()?.use { stream ->
+        Properties().apply { load(stream) }.getProperty("diplayAuthAssetsDir")
+    }
+    (fromEnvironment ?: fromLocalProperties)?.let { file(it).canonicalFile }
+}
 
 android {
     namespace = "com.shilapi.xcertplay"
@@ -15,10 +26,10 @@ android {
 
     defaultConfig {
         applicationId = "com.shihab.diplay"
-        minSdk = 28
+        minSdk = 27
         targetSdk = 37
-        versionCode = 26
-        versionName = "0.2.7"
+        versionCode = 27
+        versionName = "0.2.8"
 
     }
 
@@ -105,7 +116,8 @@ val verifyStandaloneAuthentication by tasks.registering {
     val directory = localAuthenticationAssets
     doLast {
         check(directory != null) {
-            "Standalone car builds require DIPLAY_AUTH_ASSETS_DIR; assembleDebug alone is source-only."
+            "Standalone car builds require DIPLAY_AUTH_ASSETS_DIR or local.properties diplayAuthAssetsDir; " +
+                "assembleDebug alone is source-only."
         }
         check(listOf("identity.pk8", "certificate.p7b").all {
             directory.resolve("offline-mfi/$it").let { file -> file.isFile && file.length() > 0 }
