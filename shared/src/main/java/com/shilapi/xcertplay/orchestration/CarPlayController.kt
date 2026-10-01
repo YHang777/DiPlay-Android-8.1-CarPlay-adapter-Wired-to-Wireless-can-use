@@ -126,6 +126,87 @@ internal fun isWirelessHandoffInProgress(
 ): Boolean = handoffRequested || tunnelActive || sessionActive
 
 /**
+ * Terminal-failure latch of one [CarPlayController]. Failure survives until a fresh start
+ * attempt begins, so a UI can never adopt a controller that will never make progress again.
+ */
+internal class ControllerLiveness {
+    @Volatile private var failed = false
+
+    /** Records a terminal [CarPlayController.fail]; the controller is unusable until [beginAttempt]. */
+    fun markFailed() {
+        failed = true
+    }
+
+    /** A new start/reconnect attempt is under way; any earlier failure no longer applies. */
+    fun beginAttempt() {
+        failed = false
+    }
+
+    fun isFailed(): Boolean = failed
+
+    /** True unless the controller has failed terminally or been closed. */
+    fun isUsable(closed: Boolean): Boolean = !closed && !failed
+}
+
+/**
+ * Decides whether a status may be suppressed because it equals the previously reported one.
+ * Failures and control-ended notices are always delivered: the UI reacts to them (error, retry),
+ * and swallowing a repeat used to leave the controller looking alive after it was dead.
+ */
+internal fun shouldReportStatus(last: CarPlayStatus?, status: CarPlayStatus): Boolean =
+    status != last || status is CarPlayStatus.Failed || status is CarPlayStatus.ControlEnded
+
+/**
+ * True when a wireless run that observed a stale-generation check must surface a failure
+ * instead of exiting silently. Closed controllers and runs superseded by a newer generation
+ * stay silent — the newer run (or teardown) owns all reporting — and so do runs whose status
+ * is still owned by a proven session or an in-flight handoff. Everything else is a zombie:
+ * the stack is down, nothing replaced the run, and without a failure the UI would spin
+ * forever on the last non-failure status (e.g. "wireless control running").
+ */
+internal fun shouldFailFinishedWirelessRun(
+    closed: Boolean,
+    generation: Int,
+    currentGeneration: Int,
+    activeReported: Boolean,
+    handoffInProgress: Boolean,
+): Boolean = when {
+    closed -> false
+    generation != currentGeneration -> false
+    activeReported -> false
+    handoffInProgress -> false
+    else -> true
+}
+
+/** What the wireless bring-up watchdog does when it fires. */
+internal enum class WirelessBringupWatchdogAction { IGNORE, PRESERVE_SESSION, FAIL }
+
+/**
+ * The bring-up watchdog fires once after `RunningWireless` to catch iPhones that never finish
+ * the wireless handshake while the control loop may run for hours. It ignores dead or replaced
+ * runs and runs whose session already proved itself (reporting `WirelessActive` instead, the
+ * same behavior as the handoff watchdog), and only fails when nothing came up at all.
+ */
+internal fun wirelessBringupWatchdogAction(
+    closed: Boolean,
+    failed: Boolean,
+    generation: Int,
+    currentGeneration: Int,
+    phaseIsWireless: Boolean,
+    activeReported: Boolean,
+    sessionProven: Boolean,
+): WirelessBringupWatchdogAction = when {
+    closed || failed || generation != currentGeneration || !phaseIsWireless ->
+        WirelessBringupWatchdogAction.IGNORE
+    activeReported ->
+        WirelessBringupWatchdogAction.IGNORE
+    sessionProven ->
+        WirelessBringupWatchdogAction.PRESERVE_SESSION
+    else ->
+        WirelessBringupWatchdogAction.FAIL
+}
+
+/**
  * Wires the complete wired or wireless CarPlay path: MFi coprocessor discovery, iPhone bring-up,
  * iAP2 control, transport setup, and the AirPlay media/input sessions.
  *
@@ -187,6 +268,7 @@ class CarPlayController(
     private var mfiResetLogged = false
 
     @Volatile private var closed = false
+    private val liveness = ControllerLiveness()
     @Volatile private var phase = Phase.IDLE
     @Volatile private var ch341Host: Ch341UsbHost? = null
     @Volatile private var mfiSession: MfiSession? = null
@@ -342,6 +424,10 @@ class CarPlayController(
     }
 
     fun isClosed(): Boolean = closed
+
+    /** True when this controller can still make progress or is already doing so. A controller that
+     *  has failed terminally, or has been closed, is not usable and must not be adopted by a UI. */
+    fun isUsable(): Boolean = liveness.isUsable(closed)
 
     fun hasActiveAirPlayAttachment(): Boolean = synchronized(lifecycleLock) {
         !closed && vpnService?.isAttached() == true
@@ -504,6 +590,7 @@ class CarPlayController(
     }
 
     private fun startMfi() {
+        liveness.beginAttempt()
         availabilityPollGeneration.incrementAndGet()
         phase = Phase.MFI
         onStatus(CarPlayStatus.DiscoveringMfi)
@@ -836,6 +923,7 @@ class CarPlayController(
     }
 
     private fun startWireless() {
+        liveness.beginAttempt()
         availabilityPollGeneration.incrementAndGet()
         phase = Phase.WIRELESS
         wirelessHandoffRequested.set(false)
@@ -871,14 +959,21 @@ class CarPlayController(
                 phase != Phase.WIRELESS ||
                 generation != wirelessGeneration.get()
             ) {
+                // Stale before any work: silent when closed or when a newer run supersedes this
+                // one (teardown or that run owns the final status); otherwise the phase moved on
+                // with no newer wireless run — a zombie — which exitStaleWirelessRun turns into
+                // a failure so the UI is never left spinning on the last non-failure status.
+                exitStaleWirelessRun(generation)
                 return
             }
 
             val mfi = mfiSession?.client
                 ?: throw IOException("MFi coprocessor client is unavailable")
             val hotspotInfo = startWirelessHotspot(generation)
+            // Stale mid-run: closed/superseded exits stay silent because teardown or the newer
+            // run owns reporting; exitStaleWirelessRun fails only the current-generation zombie.
             if (isStaleWirelessRun(generation)) {
-                closeWirelessStack()
+                exitStaleWirelessRun(generation)
                 return
             }
             val startedHotspot = hotspot
@@ -960,8 +1055,10 @@ class CarPlayController(
                 "wireless AirPlay listener attached bind=$hostAddressText " +
                     "port=${airPlayConfig.port}",
             )
+            // Stale mid-run: closed/superseded exits stay silent because teardown or the newer
+            // run owns reporting; exitStaleWirelessRun fails only the current-generation zombie.
             if (isStaleWirelessRun(generation)) {
-                closeWirelessStack()
+                exitStaleWirelessRun(generation)
                 return
             }
 
@@ -979,8 +1076,10 @@ class CarPlayController(
             bonjour = bonjourClient
             bonjourClient.start()
             debugLog("wireless Bonjour services started mode=interface iface=${hotspotInfo.interfaceName ?: "unknown"}")
+            // Stale mid-run: closed/superseded exits stay silent because teardown or the newer
+            // run owns reporting; exitStaleWirelessRun fails only the current-generation zombie.
             if (isStaleWirelessRun(generation)) {
-                closeWirelessStack()
+                exitStaleWirelessRun(generation)
                 return
             }
 
@@ -994,8 +1093,10 @@ class CarPlayController(
                     .also { bluetoothSocket = it }
             connectBluetoothSocket(socket, device.address)
             debugLog("wireless RFCOMM connected address=${device.address}")
+            // Stale mid-run: closed/superseded exits stay silent because teardown or the newer
+            // run owns reporting; exitStaleWirelessRun fails only the current-generation zombie.
             if (isStaleWirelessRun(generation)) {
-                closeWirelessStack()
+                exitStaleWirelessRun(generation)
                 return
             }
             val stream = BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
@@ -1005,8 +1106,10 @@ class CarPlayController(
                 onTrace = ::debugLog,
             ).also { csm = it }
             debugLog("wireless iAP2 CSM channel opened over RFCOMM")
+            // Stale mid-run: closed/superseded exits stay silent because teardown or the newer
+            // run owns reporting; exitStaleWirelessRun fails only the current-generation zombie.
             if (isStaleWirelessRun(generation)) {
-                closeWirelessStack()
+                exitStaleWirelessRun(generation)
                 return
             }
             val identification = config.identification.copy(
@@ -1029,6 +1132,10 @@ class CarPlayController(
             media.setIapTunnelHandler(::startWirelessTunnelControl)
 
             onStatus(CarPlayStatus.RunningWireless)
+            // The control loop may run for hours (see controlLoopTimeoutMillis); bound only the
+            // pre-session handshake so a silent bring-up failure cannot leave the UI spinning
+            // on "Opening CarPlay…" forever.
+            armWirelessBringupWatchdog(generation)
             debugLog("wireless Bluetooth iAP2 control starting")
             val result = Iap2WirelessControlClient(
                 session = channel,
@@ -1043,8 +1150,10 @@ class CarPlayController(
                 onIncoming = ::onRouteFrame,
                 onProgress = ::debugLog,
             )
+            // Stale mid-run: closed/superseded exits stay silent because teardown or the newer
+            // run owns reporting; exitStaleWirelessRun fails only the current-generation zombie.
             if (isStaleWirelessRun(generation)) {
-                closeWirelessStack()
+                exitStaleWirelessRun(generation)
                 return
             }
             when (result.terminal) {
@@ -1082,6 +1191,10 @@ class CarPlayController(
                     }
             }
         } catch (error: Throwable) {
+            // Reviewed: silent only when the controller was closed (teardown owns the final
+            // status) or a newer generation superseded this run (that run reports its own
+            // outcome). Every other error falls through to fail() below, so a current-generation
+            // bring-up failure can never be swallowed here.
             if (closed || generation != wirelessGeneration.get()) {
                 return
             }
@@ -1136,6 +1249,8 @@ class CarPlayController(
                         onIncoming = ::onRouteFrame,
                         onProgress = { message -> debugLog("iAP tunnel $message") },
                     )
+                    // Tunnel control of a dead or superseded run stays silent: teardown or the
+                    // newer run owns the status; the current run still reports its terminal below.
                     if (closed || generation != wirelessGeneration.get()) return@execute
                     when (result.terminal) {
                         Iap2WirelessControlTerminal.TIMED_OUT ->
@@ -1168,18 +1283,22 @@ class CarPlayController(
     private fun wirelessSessionListener(generation: Int): AirPlaySessionListener =
         object : AirPlaySessionListener by sessionListener {
             override fun onSessionActive(session: AirPlaySession) {
+                // Events from a dead or superseded run are dropped silently: the replacing run
+                // or teardown owns proof and status, and this listener must not touch them.
                 if (isStaleWirelessRun(generation)) return
                 wirelessConnectionProof.activate(generation, session)
                 sessionListener.onSessionActive(session)
             }
 
             override fun onSessionEnded(session: AirPlaySession) {
+                // Same as onSessionActive: stale-run events stay silent (see there).
                 if (isStaleWirelessRun(generation)) return
                 wirelessConnectionProof.end(generation, session)
                 sessionListener.onSessionEnded(session)
             }
 
             override fun onVideoFrameRendered(session: AirPlaySession) {
+                // Same as onSessionActive: stale-run events stay silent (see there).
                 if (isStaleWirelessRun(generation) || activeSession !== session) return
                 wirelessConnectionProof.rendered(generation, session)
             }
@@ -1198,6 +1317,9 @@ class CarPlayController(
             phase != Phase.WIRELESS ||
             generation != wirelessGeneration.get()
         ) {
+            // Ready event for a dead or superseded run: silent, because teardown or the newer
+            // run owns the status — and a zombie run is already failed by exitStaleWirelessRun
+            // or the bring-up watchdog rather than left silently spinning here.
             return
         }
         wirelessTunnelReady.set(true)
@@ -1281,6 +1403,69 @@ class CarPlayController(
         )
     }
 
+    private fun bringupWatchdogAction(generation: Int): WirelessBringupWatchdogAction =
+        wirelessBringupWatchdogAction(
+            closed = closed,
+            failed = liveness.isFailed(),
+            generation = generation,
+            currentGeneration = wirelessGeneration.get(),
+            phaseIsWireless = phase == Phase.WIRELESS,
+            activeReported = wirelessActiveReported.get(),
+            sessionProven = activeSession != null ||
+                wirelessConnectionProof.hasRenderedFrame(generation),
+        )
+
+    /**
+     * One-shot watchdog armed right after `RunningWireless`. The handoff watchdog only arms when
+     * the iPhone requests the Bluetooth handoff, so an iPhone that never finishes the iAP2
+     * handshake used to leave the control loop (and the spinner) running for hours. The fire-time
+     * guards are the cancellation: once the session proves itself this preserves it with the same
+     * `WirelessActive` reporting as [armWirelessHandoffWatchdog], and once the run ends or is
+     * replaced the firing is a no-op.
+     */
+    private fun armWirelessBringupWatchdog(generation: Int) {
+        mainHandler.postDelayed(
+            {
+                when (bringupWatchdogAction(generation)) {
+                    WirelessBringupWatchdogAction.IGNORE -> return@postDelayed
+                    WirelessBringupWatchdogAction.PRESERVE_SESSION -> {
+                        // A proven session must not be torn down for a late handshake; report
+                        // WirelessActive exactly like the handoff watchdog does so the status
+                        // moves off RunningWireless.
+                        debugLog("wireless bring-up watchdog: preserving the active CarPlay session")
+                        onStatus(CarPlayStatus.WirelessActive)
+                    }
+                    WirelessBringupWatchdogAction.FAIL -> {
+                        debugLog("wireless bring-up timed out waiting for the iPhone handshake")
+                        Thread(
+                            {
+                                // Re-check on the teardown thread: the session may have come
+                                // up while this thread was starting.
+                                if (
+                                    bringupWatchdogAction(generation) !=
+                                        WirelessBringupWatchdogAction.FAIL
+                                ) {
+                                    return@Thread
+                                }
+                                closeWirelessStack()
+                                fail(
+                                    IOException(
+                                        "iPhone did not complete the wireless CarPlay handshake",
+                                    ),
+                                )
+                            },
+                            "xcertplay-wireless-bringup-timeout",
+                        ).apply {
+                            isDaemon = true
+                            start()
+                        }
+                    }
+                }
+            },
+            WIRELESS_BRINGUP_TIMEOUT_MILLIS,
+        )
+    }
+
     private fun closeBluetoothBootstrapTransport() {
         val activeCsm = csm
         csm = null
@@ -1296,6 +1481,7 @@ class CarPlayController(
     }
 
     private fun startIphone() {
+        liveness.beginAttempt()
         availabilityPollGeneration.incrementAndGet()
         phase = Phase.IPHONE
         reenumerationAttempts = 0
@@ -1698,6 +1884,21 @@ class CarPlayController(
     private fun isStaleWirelessRun(generation: Int): Boolean =
         closed || phase != Phase.WIRELESS || generation != wirelessGeneration.get()
 
+    /**
+     * Leaves a run that observed [isStaleWirelessRun], closing the stack first (the behavior
+     * every such site already had).
+     *
+     * Deliberately does not call [fail]. A stale check with the generation still current can
+     * only mean the phase moved on — almost always a USB/wired path taking over mid wireless
+     * bring-up. That path owns the status stream; synthesizing a terminal failure here marked
+     * the whole controller unusable and showed "session crashed, please retry" while a healthy
+     * session was starting. Zombie wireless bring-up that never leaves `WIRELESS` is caught by
+     * [wirelessBringupWatchdogAction], which is scoped to that case.
+     */
+    private fun exitStaleWirelessRun(@Suppress("UNUSED_PARAMETER") generation: Int) {
+        closeWirelessStack()
+    }
+
     private fun selectWirelessBluetoothDevice(adapter: BluetoothAdapter): BluetoothDevice {
         val bonded = adapter.bondedDevices.orEmpty()
         config.wirelessBluetoothDeviceAddress?.let { selected ->
@@ -2011,6 +2212,9 @@ class CarPlayController(
 
     private fun fail(error: Throwable) {
         if (closed) return
+        // Terminal: no code path retries after fail(), so latch it and let isUsable() tell
+        // the UI not to adopt this controller (adoption used to spin "Opening CarPlay…" forever).
+        liveness.markFailed()
         onStatus(CarPlayStatus.Failed(error.message ?: error.javaClass.simpleName,
             generateSequence(error) { it.cause }.any { it is com.shilapi.xcertplay.network.P2pResetRequiredException }))
     }
@@ -2038,7 +2242,9 @@ class CarPlayController(
     private fun onStatus(status: CarPlayStatus) {
         if (closed) return
         mainHandler.post {
-            if (!closed && status != lastReportedStatus) {
+            // Failed/ControlEnded bypass the identical-consecutive dedupe: a repeated failure
+            // must reach the UI or reconnectAfterLoss never fires (see shouldReportStatus).
+            if (!closed && shouldReportStatus(lastReportedStatus, status)) {
                 lastReportedStatus = status
                 uiListener?.onDebugLog(status.debugLogMessage())
                 uiStatusReporter?.invoke(status)
@@ -2106,6 +2312,7 @@ class CarPlayController(
         private const val PERMISSION_POLL_TIMEOUT_MILLIS = 120_000L
         private const val DEVICE_AVAILABILITY_POLL_INTERVAL_MILLIS = 2_000L
         private const val WIRELESS_HANDOFF_TIMEOUT_MILLIS = 45_000L
+        private const val WIRELESS_BRINGUP_TIMEOUT_MILLIS = 60_000L
         private const val RFCOMM_CONNECT_TIMEOUT_MILLIS = 15_000L
         private const val MAXIMUM_REENUMERATION_ATTEMPTS = 2
         private const val EXECUTOR_CLOSE_TIMEOUT_MILLIS = 2_000L

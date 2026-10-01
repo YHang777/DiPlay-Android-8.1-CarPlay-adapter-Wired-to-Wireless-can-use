@@ -30,10 +30,23 @@ class AudioStream(
     private val key: ByteArray,
     private val streamType: Int = -1,
     private val onDiagnostic: (String) -> Unit = {},
+    /**
+     * Copies each datagram and re-assembles RTP only for [Listener.onPacket]. Diagnostic capture
+     * needs those bytes; the decode path does not, so normal playback skips both copies.
+     */
+    private val retainWire: Boolean = false,
 ) : Closeable {
     interface Listener {
         fun onStarted(firstSample: Int) {}
-        fun onRtp(rtp: ByteArray, sample: Int) {}
+        /**
+         * Decrypted access unit (no RTP header) plus its u32 sample timestamp.
+         *
+         * [payload] comes from [AudioPayloadPool]. A consumer that has finished with it —
+         * the bytes are copied into the decoder or AudioTrack — must hand it back with
+         * [AudioPayloadPool.release] so the next packet can reuse the allocation. A sink
+         * that ignores the buffer only loses the reuse, never correctness.
+         */
+        fun onRtp(payload: ByteArray, sample: Int) {}
         fun onPacket(
             wire: ByteArray,
             rtp: ByteArray?,
@@ -93,87 +106,156 @@ class AudioStream(
         }
         val stats = StreamReceiveStats("audio type=$streamType", onDiagnostic)
         val buffer = ByteArray(DATAGRAM_BYTES)
+        // Thread-confined scratch: one less short-lived allocation per packet on a weak SoC.
+        val aadScratch = ByteArray(8)
+        val nonceScratch = ByteArray(12)
+        // Reused for the life of the stream: receive() rewrites length and address, so the
+        // capacity is reset before every call instead of allocating a DatagramPacket each time.
+        val datagram = DatagramPacket(buffer, buffer.size)
         try {
             while (!closed.get()) {
-                val packet = DatagramPacket(buffer, buffer.size)
                 try {
                     stats.reading()
-                    socket.receive(packet)
+                    datagram.length = buffer.size
+                    socket.receive(datagram)
                 } catch (_: Exception) {
                     if (closed.get()) return else continue
                 }
+                val length = datagram.length
+                val hasRtpHeader = length >= RTP_HEADER_LEN
+                val sample = if (hasRtpHeader) readU32Be(buffer, 4) else 0
                 stats.received(
-                    size = packet.length,
-                    sequence = if (packet.length >= RTP_HEADER_LEN) {
+                    size = length,
+                    sequence = if (hasRtpHeader) {
                         ((buffer[2].toInt() and 0xff) shl 8) or (buffer[3].toInt() and 0xff)
-                    } else null,
-                    timestamp = if (packet.length >= RTP_HEADER_LEN) readU32Be(buffer, 4) else null,
+                    } else StreamReceiveStats.NO_SEQUENCE,
+                    timestamp = if (hasRtpHeader) sample.toLong() and 0xffff_ffffL
+                    else StreamReceiveStats.NO_TIMESTAMP,
                 )
-                val wire = packet.data.copyOf(packet.length)
                 val packetNumber = receivedPackets.incrementAndGet()
-                if (wire.size < RTP_HEADER_LEN + TAIL_LEN) {
+                if (length < RTP_HEADER_LEN + TAIL_LEN) {
                     if (packetNumber == 1) {
                         android.util.Log.w(
                             TAG,
-                            "audio stream type=$streamType short packet bytes=${wire.size}",
+                            "audio stream type=$streamType short packet bytes=$length",
                         )
                     }
-                    listener.onPacket(
-                        wire,
-                        null,
-                        null,
-                        IOException("audio packet shorter than RTP header plus tail"),
-                    )
+                    // Only diagnostics want the bytes back; the decoder never sees this packet.
+                    if (retainWire) {
+                        listener.onPacket(
+                            buffer.copyOf(length),
+                            null,
+                            null,
+                            IOException("audio packet shorter than RTP header plus tail"),
+                        )
+                    }
                     stats.processed()
                     continue
                 }
 
-                val aad = wire.copyOfRange(4, RTP_HEADER_LEN)
-                val sealedEnd = wire.size - NONCE_LEN
-                val sealed = wire.copyOfRange(RTP_HEADER_LEN, sealedEnd)
-                val shortNonce = wire.copyOfRange(sealedEnd, wire.size)
-                val nonce = ByteArray(12).also { shortNonce.copyInto(it, 4) }
-                val sample = readU32Be(wire, 4)
-
-                val payload = try {
-                    AirPlayCrypto.chachaOpen(key, nonce, sealed, aad)
+                // Header bytes 4..11 (timestamp + SSRC) are the AEAD associated data; the last
+                // eight wire bytes are the nonce counter that sits above four zero bytes. Decrypt
+                // straight out of the datagram buffer — no `wire` copy on the playback path.
+                System.arraycopy(buffer, 4, aadScratch, 0, RTP_HEADER_LEN - 4)
+                val sealedEnd = length - NONCE_LEN
+                System.arraycopy(buffer, sealedEnd, nonceScratch, 4, NONCE_LEN)
+                // Pooled destination: a steady-state packet allocates nothing here. The buffer is
+                // handed to the sink with onRtp and returns via AudioPayloadPool.release once the
+                // renderer has consumed it; a decrypt failure or a sink exception returns it here.
+                val payload = AudioPayloadPool.acquire(sealedEnd - RTP_HEADER_LEN - TAG_LEN)
+                // Once onRtp returns, the sink owns the payload and will release it; every other
+                // path (decrypt failure, listener exception, early return) must release it here.
+                var handedToSink = false
+                try {
+                    try {
+                        AirPlayCrypto.chachaOpenInto(
+                            key,
+                            nonceScratch,
+                            buffer,
+                            RTP_HEADER_LEN,
+                            sealedEnd - RTP_HEADER_LEN,
+                            aadScratch,
+                            payload,
+                            0,
+                        )
+                    } catch (error: Exception) {
+                        val failureNumber = authenticationFailures.incrementAndGet()
+                        if (failureNumber == 1) {
+                            android.util.Log.w(
+                                TAG,
+                                "audio stream type=$streamType first decrypt failure " +
+                                    "wire=${buffer.copyOf(length).toHexString()}",
+                                error,
+                            )
+                        }
+                        if (retainWire) {
+                            try {
+                                listener.onPacket(buffer.copyOf(length), null, sample, error)
+                            } catch (_: Exception) {
+                                // Diagnostics must never take the receive thread down.
+                            }
+                        }
+                        stats.processed()
+                        continue
+                    }
+                    val decryptedNumber = decryptedPackets.incrementAndGet()
+                    if (decryptedNumber <= FIRST_PACKET_LOG_COUNT) {
+                        android.util.Log.i(
+                            TAG,
+                            "audio stream type=$streamType packet=$decryptedNumber sample=$sample " +
+                                "wireBytes=$length payloadBytes=${payload.size} " +
+                                "payloadHead=${payload.copyOf(minOf(payload.size, 16)).toHexString()}",
+                        )
+                    } else if (decryptedNumber % PACKET_LOG_INTERVAL == 0) {
+                        android.util.Log.i(
+                            TAG,
+                            "audio stream type=$streamType decrypted=$decryptedNumber " +
+                                "authFailures=${authenticationFailures.get()}",
+                        )
+                    }
+                    if (retainWire) {
+                        val wire = buffer.copyOf(length)
+                        val rtp = ByteArray(RTP_HEADER_LEN + payload.size)
+                        System.arraycopy(wire, 0, rtp, 0, RTP_HEADER_LEN)
+                        System.arraycopy(payload, 0, rtp, RTP_HEADER_LEN, payload.size)
+                        try {
+                            listener.onPacket(wire, rtp, sample, null)
+                        } catch (_: Exception) {
+                            // Diagnostics must never take the receive thread down.
+                        }
+                    }
+                    if (!started) {
+                        started = true
+                        listener.onStarted(sample)
+                    }
+                    // Ownership transfers at the call, not at the return: submit() may have
+                    // queued the payload before throwing, and a release here would hand the
+                    // same buffer to two consumers. A throw before submit() leaks one slot —
+                    // the pool's contract allows that; it never allows a double-release.
+                    handedToSink = true
+                    listener.onRtp(payload, sample)
+                    stats.processed()
                 } catch (error: Exception) {
-                    val failureNumber = authenticationFailures.incrementAndGet()
-                    if (failureNumber == 1) {
+                    // An uncaught exception on `airplay-audio-rx` kills the Android process. A
+                    // sink/listener failure costs one packet, not the whole CarPlay session.
+                    if (!closed.get()) {
                         android.util.Log.w(
                             TAG,
-                            "audio stream type=$streamType first decrypt failure " +
-                                "wire=${wire.toHexString()}",
+                            "audio stream type=$streamType packet handler failed; dropping packet",
                             error,
                         )
                     }
-                    listener.onPacket(wire, null, sample, error)
                     stats.processed()
-                    continue
+                } finally {
+                    if (!handedToSink) {
+                        AudioPayloadPool.release(payload)
+                    }
                 }
-                val rtp = wire.copyOf(RTP_HEADER_LEN) + payload
-                val decryptedNumber = decryptedPackets.incrementAndGet()
-                if (decryptedNumber <= FIRST_PACKET_LOG_COUNT) {
-                    android.util.Log.i(
-                        TAG,
-                        "audio stream type=$streamType packet=$decryptedNumber sample=$sample " +
-                            "wireBytes=${wire.size} payloadBytes=${payload.size} " +
-                            "payloadHead=${payload.copyOf(minOf(payload.size, 16)).toHexString()}",
-                    )
-                } else if (decryptedNumber % PACKET_LOG_INTERVAL == 0) {
-                    android.util.Log.i(
-                        TAG,
-                        "audio stream type=$streamType decrypted=$decryptedNumber " +
-                            "authFailures=${authenticationFailures.get()}",
-                    )
-                }
-                listener.onPacket(wire, rtp, sample, null)
-                if (!started) {
-                    started = true
-                    listener.onStarted(sample)
-                }
-                listener.onRtp(rtp, sample)
-                stats.processed()
+                // Decrypt, log, forward and account exactly once per datagram. A second
+                // forward here (a leftover from the pooled-payload refactor) enqueued every
+                // packet twice: the FIFO held seconds of stale audio, both AudioPackets
+                // shared one pooled buffer so the first release recycled memory still being
+                // decoded, and the queue overflow showed up as constant drop/trim holes.
             }
         } finally { stats.flush(ended = true) }
     }
@@ -219,6 +301,47 @@ class AudioStream(
         const val TAIL_LEN = TAG_LEN + NONCE_LEN
         const val FIRST_PACKET_LOG_COUNT = 3
         const val PACKET_LOG_INTERVAL = 100
+    }
+}
+
+/**
+ * Size-keyed free list for decrypted audio payloads.
+ *
+ * The receive thread acquires a buffer before decrypting; the renderer returns it once the bytes
+ * are copied into the decoder or AudioTrack. Without the pool every packet allocates and then
+ * abandons its plaintext array (~50/s per stream), which is steady young-generation churn on the
+ * weak SoC this receiver targets.
+ *
+ * Buffers handed to a consumer that never returns them are simply not reused — the pool saves
+ * allocations, it never revives a buffer in place. [release] must not be called on an array that
+ * is still in use, and never twice for the same buffer.
+ */
+internal object AudioPayloadPool {
+    /** Bounds retained RAM; a burst deeper than this falls back to plain allocation. */
+    private const val MAX_IDLE = 256
+    private val idle = HashMap<Int, ArrayList<ByteArray>>()
+    private var idleTotal = 0
+
+    @Synchronized
+    fun acquire(length: Int): ByteArray {
+        val free = idle[length]
+        if (free != null && free.isNotEmpty()) {
+            idleTotal--
+            return free.removeAt(free.size - 1)
+        }
+        return ByteArray(length)
+    }
+
+    @Synchronized
+    fun release(payload: ByteArray) {
+        if (idleTotal >= MAX_IDLE) return
+        var free = idle[payload.size]
+        if (free == null) {
+            free = ArrayList()
+            idle[payload.size] = free
+        }
+        free.add(payload)
+        idleTotal++
     }
 }
 

@@ -58,7 +58,13 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
             socket = accepted
             run(accepted)
         } catch (error: Exception) {
-            if (!closed.get()) listener.onClosed(error)
+            if (!closed.get()) {
+                try {
+                    listener.onClosed(error)
+                } catch (_: Exception) {
+                    // Teardown must not throw back into the accept thread.
+                }
+            }
         }
     }
 
@@ -74,7 +80,16 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
                 if (bodySize > MAX_BODY) break
                 val body = readFully(input, bodySize) ?: break
                 stats.received(HEADER_LEN + bodySize)
-                onMessage(header, body)
+                try {
+                    onMessage(header, body)
+                } catch (error: Exception) {
+                    // One bad frame or a throwing listener must not close the TCP screen
+                    // stream: that is what turned a single decrypt glitch into "session
+                    // crashed, please retry" loops. Drop the message and keep reading.
+                    if (!closed.get()) {
+                        Log.w(TAG, "video message failed; dropping frame", error)
+                    }
+                }
                 stats.processed()
             }
         } catch (error: Exception) {
@@ -83,18 +98,34 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
             stats.flush(ended = true)
             if (socket === sock) socket = null
             safeClose(sock)
-            if (!closed.get()) listener.onClosed(failure)
+            if (!closed.get()) {
+                try {
+                    listener.onClosed(failure)
+                } catch (_: Exception) {
+                    // Teardown must not throw back into the read thread.
+                }
+            }
         }
     }
 
     private fun onMessage(header: ByteArray, body: ByteArray) {
         when (header[OPCODE_OFFSET].toInt() and 0xff) {
             OP_VIDEO_FRAME -> {
-                val payload = if (body.size >= ScreenCodec.TAG_SIZE) {
-                    ScreenCodec.decryptFrame(key, frameCounter.get(), header, body)
-                        .also { frameCounter.incrementAndGet() }
-                } else {
-                    body
+                // Consume the counter slot even when decrypt fails. Skipping the increment
+                // on error would reuse that nonce on the next sealed frame, which is an
+                // AEAD catastrophe and would also desynchronise the stream counter.
+                val counter = frameCounter.getAndIncrement()
+                val payload = try {
+                    if (body.size >= ScreenCodec.TAG_SIZE) {
+                        ScreenCodec.decryptFrame(key, counter, header, body)
+                    } else {
+                        body
+                    }
+                } catch (error: Exception) {
+                    if (!closed.get()) {
+                        Log.w(TAG, "video frame decrypt failed; dropping frame counter=$counter", error)
+                    }
+                    return
                 }
                 if (firstFrameLogged.compareAndSet(false, true)) {
                     Log.i(

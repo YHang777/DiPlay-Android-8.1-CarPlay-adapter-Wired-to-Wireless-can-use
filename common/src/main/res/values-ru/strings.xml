@@ -352,6 +352,7 @@
     <string name="token_optional">Токен (необязательно)</string>
     <string name="transport_error_reconnecting">Ошибка передачи; переподключение</string>
     <string name="turn_on_bluetooth">Включить Bluetooth</string>
+    <string name="turn_on_bluetooth_in_the_head_unit_s_settings_to_connect">Включите Bluetooth в настройках головного устройства для подключения.</string>
     <string name="turn_on_wi_fi_in_the_head_unit_s_settings_to_connect">Включите Wi-Fi в настройках головного устройства для подключения.</string>
     <string name="turn_the_car_s_wi_fi_switch_on_allow_location_nearby_devic">Включите переключатель Wi-Fi автомобиля. Разрешите местоположение/«Рядом находящиеся устройства» при запросе и включите местоположение, когда Android попросит. Если воспроизведение подтормаживает, попробуйте встроенную точку доступа на 5 ГГц.</string>
     <string name="usage_access_enabled">Доступ к использованию: включён</string>

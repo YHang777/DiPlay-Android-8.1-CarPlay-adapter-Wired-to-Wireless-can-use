@@ -352,6 +352,7 @@
     <string name="token_optional">Token (opcional)</string>
     <string name="transport_error_reconnecting">Error de transporte; reconectando</string>
     <string name="turn_on_bluetooth">Activar Bluetooth</string>
+    <string name="turn_on_bluetooth_in_the_head_unit_s_settings_to_connect">Activa el Bluetooth en los ajustes de la unidad principal para conectarte.</string>
     <string name="turn_on_wi_fi_in_the_head_unit_s_settings_to_connect">Activa el Wi‑Fi en los ajustes de la unidad principal para conectarte.</string>
     <string name="turn_the_car_s_wi_fi_switch_on_allow_location_nearby_devic">Activa el interruptor Wi‑Fi del coche. Permite Ubicación/«Dispositivos cercanos» si se te pide y activa la ubicación cuando Android lo solicite. Si la reproducción se traba, prueba el punto de acceso integrado del coche a 5 GHz.</string>
     <string name="usage_access_enabled">Acceso al uso: activado</string>

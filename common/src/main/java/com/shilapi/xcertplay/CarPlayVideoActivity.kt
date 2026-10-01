@@ -88,9 +88,10 @@ class CarPlayVideoActivity : Activity() {
             setOnClickListener { onClick(); showControls() }
         }
         playPause = pill("") { CarPlayVideo.setPlaying(!CarPlayVideo.playing) }
+        val back = pill(getString(R.string.video_back_to_carplay)) { finish() }
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(pill("‹  " + getString(R.string.video_back_to_carplay)) { finish() })
+            addView(back)
             addView(playPause, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(16) })
         }
     }

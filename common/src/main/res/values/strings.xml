@@ -361,6 +361,7 @@
     <string name="token_optional">Token (optional)</string>
     <string name="transport_error_reconnecting">Transport error; reconnecting</string>
     <string name="turn_on_bluetooth">Turn on Bluetooth</string>
+    <string name="turn_on_bluetooth_in_the_head_unit_s_settings_to_connect">Turn on Bluetooth in the head unit’s settings to connect.</string>
     <string name="turn_on_wi_fi_in_the_head_unit_s_settings_to_connect">Turn on Wi-Fi in the head unit’s settings to connect.</string>
     <string name="turn_the_car_s_wi_fi_switch_on_allow_location_nearby_devic">Turn the car’s Wi-Fi switch on. Allow Location / Nearby devices if requested and enable Location when Android asks. If playback stutters, try the built-in car hotspot at 5 GHz.</string>
     <string name="usage_access_enabled">Usage Access: enabled</string>

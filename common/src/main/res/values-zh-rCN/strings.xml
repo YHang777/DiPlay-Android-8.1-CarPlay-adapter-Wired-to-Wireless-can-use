@@ -361,6 +361,7 @@
     <string name="token_optional">令牌（可选）</string>
     <string name="transport_error_reconnecting">传输错误；正在重新连接</string>
     <string name="turn_on_bluetooth">打开蓝牙</string>
+    <string name="turn_on_bluetooth_in_the_head_unit_s_settings_to_connect">请在车机设置中打开蓝牙后再连接。</string>
     <string name="turn_on_wi_fi_in_the_head_unit_s_settings_to_connect">请在车机设置中打开 Wi-Fi 后再连接。</string>
     <string name="turn_the_car_s_wi_fi_switch_on_allow_location_nearby_devic">打开车机的 Wi-Fi 开关。如提示请允许位置/附近的设备权限，并在 Android 询问时启用位置。如果播放卡顿，请尝试使用 5 GHz 的内置车机热点。</string>
     <string name="usage_access_enabled">使用访问权限：已启用</string>

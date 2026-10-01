@@ -22,7 +22,7 @@ interface MediaSink {
     fun setVideoDiagnosticHandler(type: Int, handler: (String) -> Unit) {}
     fun onScreenStreamActive(type: Int, active: Boolean) {}
     fun onAudioStarted(id: AudioStreamId, format: AudioFormat, firstSample: Int) {}
-    fun onAudioRtp(id: AudioStreamId, format: AudioFormat, rtp: ByteArray, sample: Int) {}
+    fun onAudioRtp(id: AudioStreamId, format: AudioFormat, payload: ByteArray, sample: Int) {}
     fun onAudioStopped(id: AudioStreamId) {}
     fun onMicrophoneStarted(id: AudioStreamId, config: MicrophoneConfig) {}
     fun onMicrophoneStopped(id: AudioStreamId) {}
@@ -147,7 +147,8 @@ class CarPlayMediaEngine(
 
         val capture = audioCaptureDirectory?.let { AudioPacketCapture(it, type) }
         if (capture != null) audioCaptures[streamKey] = capture
-        val audio = AudioStream(key, type, session::logDebug)
+        // Diagnostic capture is the only consumer of the raw datagram; playback decrypts in place.
+        val audio = AudioStream(key, type, session::logDebug, retainWire = capture != null)
         val (dataPort, controlPort) = audio.listen(
             object : AudioStream.Listener {
                 override fun onStarted(firstSample: Int) {
@@ -157,8 +158,8 @@ class CarPlayMediaEngine(
                     microphone?.let { sink.onMicrophoneStarted(streamId, it) }
                 }
 
-                override fun onRtp(rtp: ByteArray, sample: Int) =
-                    sink.onAudioRtp(streamId, format, rtp, sample)
+                override fun onRtp(payload: ByteArray, sample: Int) =
+                    sink.onAudioRtp(streamId, format, payload, sample)
 
                 override fun onPacket(
                     wire: ByteArray,

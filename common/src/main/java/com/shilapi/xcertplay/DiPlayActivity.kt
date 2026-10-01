@@ -149,7 +149,15 @@ class DiPlayActivity : ComponentActivity() {
      * first one just opened.
      */
     private fun maybeAutoConnect() {
-        if (setupError != null || CarPlayBackgroundSession.hasSession()) return
+        if (setupError != null) return
+        val snapshot = CarPlayBackgroundSession.snapshot()
+        if (snapshot != null) {
+            if (snapshot.controller.isUsable()) return // a live session is already up
+            // A dead-but-registered session would otherwise suppress auto-connect forever.
+            CarPlayBackgroundSession.clear(snapshot.controller)
+        } else if (CarPlayBackgroundSession.hasSession()) {
+            return // mid-teardown; its stop completion lets the next attempt through
+        }
         if (intent.getStringExtra("page") != null) return
         val fromBoot = intent.getBooleanExtra(EXTRA_AUTO_OPEN_CARPLAY, false)
         if (fromBoot) intent.removeExtra(EXTRA_AUTO_OPEN_CARPLAY)
@@ -197,8 +205,15 @@ class DiPlayActivity : ComponentActivity() {
         status = label(getString(R.string.ready_when_you_are), 24, TEXT, true).apply { setPadding(0, dp(10), 0, dp(16)) }
         card.addView(status)
         connectButton = button(getString(R.string.connect_phone), true) {
-            if (CarPlayBackgroundSession.hasSession()) openProjection()
-            else connect(true)
+            val snapshot = CarPlayBackgroundSession.snapshot()
+            val usable = snapshot?.controller?.isUsable() == true
+            if (shouldOpenProjectionDirectly(CarPlayBackgroundSession.hasSession(), usable)) {
+                openProjection()
+            } else {
+                // A stale session must not skip the gates that surface the radio/pairing prompts.
+                if (snapshot != null && !usable) CarPlayBackgroundSession.clear(snapshot.controller)
+                connect(true)
+            }
         }
         card.addView(connectButton, matchButton())
         val connectionHint = when (AirPlayPersistence.loadWirelessHotspotMode(this)) {

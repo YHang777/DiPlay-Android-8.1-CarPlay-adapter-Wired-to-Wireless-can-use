@@ -15,8 +15,8 @@ internal class StreamReceiveStats(
     private var lastReceivedNs = 0L
     private var maxInterArrivalNs = 0L
     private var maxProcessNs = 0L
-    private var lastTimestamp: Int? = null
-    private var nextSequence: Int? = null
+    private var lastTimestamp: Long = NO_TIMESTAMP
+    private var nextSequence: Int = NO_SEQUENCE
     private var forwardGapPackets = 0
     private var sequenceGapEvents = 0
     private var maxSequenceGap = 0
@@ -26,7 +26,13 @@ internal class StreamReceiveStats(
 
     fun reading() { readStart = nowNs() }
 
-    fun received(size: Int, sequence: Int? = null, timestamp: Int? = null) {
+    /**
+     * Records one received datagram. [sequence] and [timestamp] are primitive sentinels rather
+     * than `Int?` so the receive loop boxes nothing per packet — this runs on every audio and
+     * video datagram on a weak SoC. [timestamp] is the RTP timestamp zero-extended to a Long, so
+     * every u32 is representable and [NO_TIMESTAMP] cannot collide with a real tick.
+     */
+    fun received(size: Int, sequence: Int = NO_SEQUENCE, timestamp: Long = NO_TIMESTAMP) {
         processingStart = nowNs()
         maxReadNs = maxOf(maxReadNs, processingStart - readStart)
         if (lastReceivedNs != 0L) {
@@ -35,23 +41,23 @@ internal class StreamReceiveStats(
         lastReceivedNs = processingStart
         packets++
         bytes += size
-        if (sequence != null) {
+        if (sequence != NO_SEQUENCE) {
             val expected = nextSequence
-            val delta = if (expected == null) 0 else (sequence - expected) and 0xffff
+            val delta = if (expected == NO_SEQUENCE) 0 else (sequence - expected) and 0xffff
             if (delta < 0x8000) {
                 forwardGapPackets += delta
                 if (delta > 0) {
                     sequenceGapEvents++
                     maxSequenceGap = maxOf(maxSequenceGap, delta)
                     lastSequenceGap = "expected=$expected received=$sequence missing=$delta " +
-                        "previousRtpTs=${lastTimestamp?.toUnsignedLong() ?: "unknown"} " +
-                        "receivedRtpTs=${timestamp?.toUnsignedLong() ?: "unknown"}"
+                        "previousRtpTs=${if (lastTimestamp == NO_TIMESTAMP) "unknown" else lastTimestamp} " +
+                        "receivedRtpTs=${if (timestamp == NO_TIMESTAMP) "unknown" else timestamp}"
                     lastSequenceGapAtMs = (processingStart - windowStart) / 1_000_000L
                 }
                 nextSequence = (sequence + 1) and 0xffff
             } else lateOrDuplicate++
         }
-        if (timestamp != null) lastTimestamp = timestamp
+        if (timestamp != NO_TIMESTAMP) lastTimestamp = timestamp
     }
 
     fun processed() {
@@ -81,6 +87,11 @@ internal class StreamReceiveStats(
         lateOrDuplicate = 0
     }
 
-    private fun Int.toUnsignedLong(): Long = toLong() and 0xffff_ffffL
+    internal companion object {
+        /** "No sequence on this datagram" sentinel; a real RTP sequence is always 0..0xffff. */
+        const val NO_SEQUENCE = -1
 
+        /** "No RTP timestamp on this datagram" sentinel; real values are zero-extended u32. */
+        const val NO_TIMESTAMP = -1L
+    }
 }

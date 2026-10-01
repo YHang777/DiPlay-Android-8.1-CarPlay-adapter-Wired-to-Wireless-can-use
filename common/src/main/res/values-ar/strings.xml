@@ -352,6 +352,7 @@
     <string name="token_optional">الرمز (اختياري)</string>
     <string name="transport_error_reconnecting">خطأ في النقل؛ إعادة الاتصال</string>
     <string name="turn_on_bluetooth">تشغيل البلوتوث</string>
+    <string name="turn_on_bluetooth_in_the_head_unit_s_settings_to_connect">شغّل البلوتوث في إعدادات وحدة القيادة للاتصال.</string>
     <string name="turn_on_wi_fi_in_the_head_unit_s_settings_to_connect">شغّل واي فاي في إعدادات وحدة القيادة للاتصال.</string>
     <string name="turn_the_car_s_wi_fi_switch_on_allow_location_nearby_devic">شغّل مفتاح واي فاي السيارة. اسمح بالموقع/«الأجهزة القريبة» عند الطلب وفعّل الموقع عندما يطلبه Android. إذا اتقطّع التشغيل، جرّب نقطة اتصال السيارة المدمجة على 5 GHz.</string>
     <string name="usage_access_enabled">الوصول للاستخدام: مُفعّل</string>

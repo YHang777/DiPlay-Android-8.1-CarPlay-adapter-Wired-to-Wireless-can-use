@@ -12,6 +12,8 @@ internal class VideoStats(
     private var received = 0
     private var rendered = 0
     private var recoveries = 0
+    private var softSkips = 0
+    private var framesDroppedByPressure = 0
     private var bytes = 0L
     private var maxArrivalGapNs = 0L
     private var touchSamples = 0
@@ -38,7 +40,11 @@ internal class VideoStats(
 
     @Synchronized fun onRecovery() { recoveries++ }
 
-    @Synchronized fun logIfDue(): String? {
+    @Synchronized fun onSoftSkip() { softSkips++ }
+
+    @Synchronized fun onPressureDrop() { framesDroppedByPressure++ }
+
+    @Synchronized fun logIfDue(pressure: Int = AudioPressure.CALM): String? {
         val now = nanoTime()
         val elapsedNs = now - windowStartNs
         if (elapsedNs < WINDOW_NS) return null
@@ -46,15 +52,18 @@ internal class VideoStats(
         if (received == 0 && touchSamples == 0) { windowStartNs = now; return null }
         val touchAvgMs = if (touchSamples == 0) -1 else touchLatencySumNs / touchSamples / 1_000_000
         val line = ("video stats$label rx=%.1ffps shown=%.1ffps maxGap=%dms kbps=%d recoveries=%d " +
+            "softSkips=%d pressureDropped=%d pressure=%s " +
             "touch2frame avg=%dms max=%dms n=%d touchSendMax=%dms").format(
             received / seconds, rendered / seconds, maxArrivalGapNs / 1_000_000,
             (bytes * 8 / 1000 / seconds).toLong(), recoveries,
+            softSkips, framesDroppedByPressure, AudioPressure.label(pressure),
             touchAvgMs, maxTouchLatencyNs / 1_000_000, touchSamples, TouchLatencyProbe.maxSendNs / 1_000_000,
         )
         TouchLatencyProbe.maxSendNs = 0
         Log.i(TAG, line)
         windowStartNs = now
         received = 0; rendered = 0; recoveries = 0; bytes = 0; maxArrivalGapNs = 0
+        softSkips = 0; framesDroppedByPressure = 0
         touchSamples = 0; touchLatencySumNs = 0; maxTouchLatencyNs = 0
         return line
     }

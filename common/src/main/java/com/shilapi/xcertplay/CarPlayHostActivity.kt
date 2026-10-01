@@ -1,8 +1,12 @@
 package com.shilapi.xcertplay
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.content.res.ColorStateList
@@ -14,6 +18,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.MediaCodecList
 import android.media.MediaFormat
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -45,6 +50,7 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -68,6 +74,7 @@ import com.shilapi.xcertplay.host.R
 import com.shilapi.xcertplay.location.AndroidCarPlayLocationProvider
 import com.shilapi.xcertplay.media.AndroidMediaSink
 import com.shilapi.xcertplay.media.CarPlayTouchMapper
+import com.shilapi.xcertplay.network.CarHotspotStatus
 import com.shilapi.xcertplay.network.CarPlayVpnService
 import com.shilapi.xcertplay.orchestration.CarPlayController
 import com.shilapi.xcertplay.orchestration.CarPlayRuntimeConfig
@@ -342,6 +349,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val teardownExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val airPlayCommandExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private var radioStateReceiver: BroadcastReceiver? = null
     private val logLines = ArrayDeque<LogEntry>()
     private val expireOldLogLines = Runnable { refreshLogView(System.currentTimeMillis()) }
     private val applyDisplaySize = Runnable {
@@ -763,9 +771,52 @@ class CarPlayHostActivity : ComponentActivity() {
         if (hasFocus) applyFullscreenMode()
     }
 
+    override fun onStart() {
+        super.onStart()
+        registerRadioStateReceiver()
+    }
+
     override fun onStop() {
+        unregisterRadioStateReceiver()
         // The controller, USB/iAP2 link, and VPN attachment intentionally outlive the UI.
         super.onStop()
+    }
+
+    // The user often has to leave the app to flip a radio. onReceive runs on the main thread,
+    // so it only checks the state flag and hands the rest to maybeStartCarPlay()'s gates.
+    private fun registerRadioStateReceiver() {
+        if (radioStateReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (shuttingDown.get() || intent?.radioTurnedEnabled() != true) return
+                maybeStartCarPlay()
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+            addAction(WifiManager.WIFI_STATE_CHANGED_ACTION)
+            addAction(WIFI_AP_STATE_CHANGED_ACTION)
+        }
+        ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        radioStateReceiver = receiver
+    }
+
+    private fun unregisterRadioStateReceiver() {
+        val receiver = radioStateReceiver ?: return
+        radioStateReceiver = null
+        runCatching { unregisterReceiver(receiver) }
+    }
+
+    private fun Intent.radioTurnedEnabled(): Boolean = when (action) {
+        BluetoothAdapter.ACTION_STATE_CHANGED ->
+            getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR) ==
+                BluetoothAdapter.STATE_ON
+        WifiManager.WIFI_STATE_CHANGED_ACTION ->
+            getIntExtra(WifiManager.EXTRA_WIFI_STATE, WifiManager.WIFI_STATE_UNKNOWN) ==
+                WifiManager.WIFI_STATE_ENABLED
+        WIFI_AP_STATE_CHANGED_ACTION ->
+            getIntExtra(EXTRA_WIFI_AP_STATE, -1) in AP_STATES_ENABLED
+        else -> false
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -3079,7 +3130,7 @@ class CarPlayHostActivity : ComponentActivity() {
         if (!menuOpen && controllerGeneration == restartGeneration) {
             updateHotspotStatus(status)
             val description = status.describe()
-            setConnectionStage(description)
+            setConnectionStage(description, friendly = friendlyStatusStage(status))
             when (status) {
                 is CarPlayStatus.Failed -> if (status.wifiResetRequired) {
                     wifiRecoveryButton?.visibility = View.VISIBLE
@@ -3099,6 +3150,13 @@ class CarPlayHostActivity : ComponentActivity() {
         val snapshot = CarPlayBackgroundSession.snapshot() ?: return false
         if (snapshot.controller.isClosed()) {
             CarPlayBackgroundSession.clear(snapshot.controller)
+            return false
+        }
+        // A failed controller is not closed: adopting it pins the stage on "already running"
+        // while maybeStartCarPlay early-returns on controller != null, so the spinner never ends.
+        if (!snapshot.controller.isUsable()) {
+            CarPlayBackgroundSession.clear(snapshot.controller)
+            controller = null
             return false
         }
         displayDiagnosticAttempt = DisplayDiagnosticSnapshot.currentAttempt(this)
@@ -3314,8 +3372,34 @@ class CarPlayHostActivity : ComponentActivity() {
         ) {
             return
         }
+        // A wireless stack started with a radio off throws only after the hotspot is already
+        // up; park on a stage that names the switch instead. The radio-state receiver and the
+        // next onResume both come back here once the user flips it on.
+        if (!wirelessRadiosReady()) {
+            setConnectionStage(wirelessRadioStageMessage())
+            return
+        }
         startCarPlay(size)
     }
+
+    private fun wirelessRadiosReady(): Boolean =
+        radiosReadyForWireless(wirelessEnabled, bluetoothRadioEnabled(), wifiReady())
+
+    private fun bluetoothRadioEnabled(): Boolean =
+        getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true
+
+    private fun wifiReady(): Boolean = wifiReadyForWireless(
+        clientEnabled = getSystemService(WifiManager::class.java)?.isWifiEnabled == true,
+        hotspotEnabled = CarHotspotStatus.isEnabled(this),
+    )
+
+    // Raw English markers on purpose: friendlyStage matches them in every locale.
+    private fun wirelessRadioStageMessage(): String =
+        if (bluetoothRadioEnabled()) {
+            "Turn on Wi-Fi to connect wirelessly"
+        } else {
+            "Turn on Bluetooth to connect wirelessly"
+        }
 
     private fun reconnectAfterLoss(reason: String) {
         if (!CarPlayBackgroundSession.isOwner(this)) return
@@ -3344,7 +3428,11 @@ class CarPlayHostActivity : ComponentActivity() {
                     return@postDelayed
                 }
                 if (handshakeResetInProgress) {
-                    // A restart is mid-teardown; it will start the new stack itself.
+                    // A restart is mid-teardown; it will start the new stack itself — unless that
+                    // start then refuses (menu open, transport not ready, a controller that
+                    // appeared), in which case nothing would ever retry. Leave a resume request
+                    // for the teardown's completion callback instead of dropping this attempt.
+                    startAfterHandshakeReset = true
                     return@postDelayed
                 }
                 restartCarPlay("Reconnecting after $reason")
@@ -3381,28 +3469,43 @@ class CarPlayHostActivity : ComponentActivity() {
         // reconnect path while the next one is still coming up.
         stallWatchdog = null
         mainHandler.removeCallbacks(stallCheck)
-        teardownExecutor.execute {
-            // A throw here must not leave handshakeResetInProgress latched: every later reconnect
-            // early-returns on it, so a stuck flag is a permanent dead state until the app restarts.
-            teardownCarPlayStack(
-                closeController = { oldController?.close() },
-                awaitControllerClosed = { oldController?.awaitClosed(CONTROLLER_CLOSE_TIMEOUT_MILLIS) },
-                closeSink = { oldSink?.close() },
-                reportFailure = { message, error -> Log.w(TAG, message, error) },
-                onComplete = {
-                    runOnUiThread {
-                        // Clear the flag even when a newer restart owns the generation: whoever is
-                        // running now needs it gone to be able to start or retry at all.
-                        handshakeResetInProgress = false
-                        if (shuttingDown.get()) return@runOnUiThread
-                        if (generation == restartGeneration) {
-                            startCarPlay(size)
-                        } else if (controller == null) {
-                            maybeStartCarPlay()
+        try {
+            teardownExecutor.execute {
+                // A throw here must not leave handshakeResetInProgress latched: every later reconnect
+                // early-returns on it, so a stuck flag is a permanent dead state until the app restarts.
+                teardownCarPlayStack(
+                    closeController = { oldController?.close() },
+                    awaitControllerClosed = { oldController?.awaitClosed(CONTROLLER_CLOSE_TIMEOUT_MILLIS) },
+                    closeSink = { oldSink?.close() },
+                    reportFailure = { message, error -> Log.w(TAG, message, error) },
+                    onComplete = {
+                        runOnUiThread {
+                            // Clear the flag even when a newer restart owns the generation: whoever is
+                            // running now needs it gone to be able to start or retry at all.
+                            handshakeResetInProgress = false
+                            if (shuttingDown.get()) return@runOnUiThread
+                            val resume = startAfterHandshakeReset
+                            startAfterHandshakeReset = false
+                            if (generation == restartGeneration) {
+                                startCarPlay(size)
+                                // A refused start must not swallow a pending resume request.
+                                if (resume && controller == null) maybeStartCarPlay()
+                            } else if (controller == null) {
+                                maybeStartCarPlay()
+                            }
                         }
-                    }
-                },
-            )
+                    },
+                )
+            }
+        } catch (error: Throwable) {
+            // A rejected task never runs onComplete, so clear the latch here or no stack can
+            // ever start again; honor a pending resume while we are at it.
+            Log.w(TAG, "teardown scheduling rejected", error)
+            handshakeResetInProgress = false
+            if (startAfterHandshakeReset) {
+                startAfterHandshakeReset = false
+                maybeStartCarPlay()
+            }
         }
     }
 
@@ -3593,10 +3696,20 @@ class CarPlayHostActivity : ComponentActivity() {
         }
     }
 
-    private fun setConnectionStage(message: String) {
+    /**
+     * [message] is what the debug overlay keeps. [friendly] is a precomputed user-facing label:
+     * [CarPlayStatus] output must supply one, because [friendlyStage] matches English words and
+     * running it over localized [CarPlayStatus.describe] text gives a different label per locale.
+     */
+    private fun setConnectionStage(message: String, friendly: String? = null) {
         latestStage = message
-        stageStatusView?.text = friendlyStage(message)
+        stageStatusView?.text = friendly ?: friendlyStage(message)
         updateDebugOverlays()
+    }
+
+    private fun friendlyStatusStage(status: CarPlayStatus): String {
+        val res = statusStageRes(status)
+        return if (res != NO_STATUS_STAGE_RES) getString(res) else friendlyStage(status.describe())
     }
 
     private fun updateDebugOverlays() {
@@ -3606,6 +3719,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun friendlyStage(message: String): String = when {
         message.contains("Turn on Wi-Fi", true) -> getString(R.string.turn_on_wi_fi_in_the_head_unit_s_settings_to_connect)
+        message.contains("Turn on Bluetooth", true) -> getString(R.string.turn_on_bluetooth_in_the_head_unit_s_settings_to_connect)
         message.contains("Allow precise Location", true) -> getString(R.string.allow_precise_location_for_diplay_in_the_head_unit_s_app_p)
         message.contains("Allow Nearby devices", true) -> getString(R.string.allow_nearby_devices_for_diplay_in_the_head_unit_s_app_per)
         message.contains("createGroup failed", true) -> getString(R.string.the_head_unit_couldn_t_start_carplay_wi_fi_check_wi_fi_and)
@@ -3618,6 +3732,11 @@ class CarPlayHostActivity : ComponentActivity() {
         message.contains("paired", true) -> getString(R.string.looking_for_your_paired_iphone)
         message.contains("Bluetooth", true) -> getString(R.string.connecting_to_your_iphone)
         message.contains("reconnect", true) || message.contains("ended", true) -> getString(R.string.reconnecting_to_your_iphone)
+        // These two must precede the "active"/"running" catch-all below: describe() renders both
+        // with those words, and mapping a live wireless session to "Opening CarPlay…" is what
+        // made a healthy-but-waiting connection look like an infinite spinner.
+        message.contains("Wireless CarPlay active", true) -> getString(R.string.getting_carplay_ready)
+        message.contains("Wireless CarPlay control running", true) -> getString(R.string.connecting_to_your_iphone)
         message.contains("active", true) || message.contains("running", true) -> getString(R.string.opening_carplay)
         else -> getString(R.string.getting_carplay_ready)
     }
@@ -3724,6 +3843,14 @@ class CarPlayHostActivity : ComponentActivity() {
         const val LOG_RETENTION_MILLIS = 5 * 60_000L
         const val DISPLAY_CHANGE_DEBOUNCE_MILLIS = 500L
 
+        // The Wi-Fi AP state constants are hidden API; these are the strings the system sends.
+        const val WIFI_AP_STATE_CHANGED_ACTION = "android.net.wifi.WIFI_AP_STATE_CHANGED"
+        const val EXTRA_WIFI_AP_STATE = "android.net.wifi.extra.WIFI_AP_STATE"
+
+        // AOSP WIFI_AP_STATE_ENABLED is 13, the value CarHotspotStatus keys on; some firmwares
+        // answer 17. Accept both — do not narrow this set.
+        val AP_STATES_ENABLED = intArrayOf(17, 13)
+
         /**
          * How often an active screen stream is asked whether it has produced a frame lately. Short
          * enough to notice a freeze while driving, long enough that the check itself is free.
@@ -3826,4 +3953,52 @@ internal object CarPlayBackgroundSession {
         width = 0
         height = 0
     }
+}
+
+/**
+ * The home Connect button jumps straight into a live background session, but a session whose
+ * controller has failed or closed must fall back through the connect gates (radio and pairing
+ * prompts) instead of dropping the user onto a dead stack's spinner.
+ */
+internal fun shouldOpenProjectionDirectly(hasSession: Boolean, controllerUsable: Boolean): Boolean =
+    hasSession && controllerUsable
+
+/** Wired/VPN mode never waits on radios; wireless needs Bluetooth and Wi-Fi up before starting. */
+internal fun radiosReadyForWireless(
+    wirelessEnabled: Boolean,
+    bluetoothEnabled: Boolean,
+    wifiEnabled: Boolean,
+): Boolean = !wirelessEnabled || (bluetoothEnabled && wifiEnabled)
+
+/**
+ * Whether Wi-Fi counts as up for a wireless start.
+ *
+ * While CarPlay is linked this fleet runs the head unit's own hotspot, which owns the radio —
+ * so [WifiManager.isWifiEnabled] reads false with every setting prepared. Gating on the client
+ * STA alone parks the app on "Turn on Wi-Fi" forever. [hotspotEnabled] is the AP state, and
+ * null when the firmware hides it: [CarHotspotStatus]'s contract is that a hidden AP state
+ * must not block the connection, so only "known off" is a real no.
+ */
+internal fun wifiReadyForWireless(
+    clientEnabled: Boolean,
+    hotspotEnabled: Boolean?,
+): Boolean = clientEnabled || hotspotEnabled != false
+
+/** 0 means "no fixed mapping" — the caller falls back to the raw-message ladder. */
+internal const val NO_STATUS_STAGE_RES = 0
+
+/**
+ * Fixed stage label for the statuses a live session actually sits in, as a resource id so the
+ * choice is locale-independent. Without this, [CarPlayStatus.describe] output (already
+ * localized) is re-mapped by matching English words in `friendlyStage`, and a healthy wireless
+ * session reads "Opening CarPlay…" in English and "Getting CarPlay ready…" in zh-CN.
+ */
+internal fun statusStageRes(status: CarPlayStatus): Int = when (status) {
+    CarPlayStatus.RunningWireless -> R.string.connecting_to_your_iphone
+    CarPlayStatus.WirelessActive -> R.string.getting_carplay_ready
+    CarPlayStatus.RunningControl -> R.string.opening_carplay
+    CarPlayStatus.ControlEnded -> R.string.reconnecting_to_your_iphone
+    // Failed keeps the ladder: its message is untranslated stack text (socket / RFCOMM /
+    // permission / ...), and those substrings are exactly what the ladder is built to catch.
+    else -> NO_STATUS_STAGE_RES
 }

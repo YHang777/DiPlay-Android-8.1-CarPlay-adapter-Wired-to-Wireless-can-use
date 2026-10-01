@@ -18,6 +18,32 @@ class VideoDecodeQueueTest {
         assertFalse(chain.accepts(predicted, VideoCodec.H264))
     }
 
+    /**
+     * Regression: dropping an interframe from an intact chain leaves a hole that the next
+     * P-frame can be decoded against. Pressure easing mid-GOP then feeds a frame whose
+     * reference never decoded — visible corruption on the weak decoders this path targets.
+     *
+     * Every pressure drop has to go through this path (decode thread). A drop on the RTP
+     * thread cannot see an IDR that has been offered but not yet queued, so it will discard
+     * an interframe that would have decoded *after* that IDR — the same hole, reopened.
+     */
+    @Test fun droppedInterframeBreaksTheChainSoDependentsWaitForAnIdr() {
+        val chain = VideoReferenceChain()
+        val idr = byteArrayOf(0, 0, 0, 1, 0x65, 1)
+        val predicted = byteArrayOf(0, 0, 0, 1, 0x41, 1)
+        chain.onQueued() // a previous IDR made the chain healthy
+        assertFalse(chain.needsKeyFrame)
+
+        // feed() drops a P-frame under pressure and must break the chain...
+        chain.reset()
+        // ...so that the next P-frame (which references the dropped one) is refused,
+        assertFalse(chain.accepts(predicted, VideoCodec.H264))
+        // and only a real IDR restores decoding.
+        assertTrue(chain.accepts(idr, VideoCodec.H264))
+        chain.onQueued()
+        assertTrue(chain.accepts(predicted, VideoCodec.H264))
+    }
+
     @Test fun overflowPreservesConfigurationAndResetsBeforeNewReferenceChain() {
         val queue = VideoDecodeQueue(maxFrames = 2)
         val config = VideoJob.Config(VideoCodec.H264, byteArrayOf(1))
@@ -61,6 +87,38 @@ class VideoDecodeQueueTest {
         }
         assertEquals(listOf(1, 2, 3), submitted)
         assertEquals(6, dequeues)
+    }
+
+    @Test fun polledFramesFreeTheirSlotsForNewOffers() {
+        val queue = VideoDecodeQueue(maxFrames = 2, maxBytes = 100)
+        queue.offer(VideoJob.Frame(byteArrayOf(1, 2, 3)))
+        queue.offer(VideoJob.Frame(byteArrayOf(4, 5)))
+        // Both slots are full: the third offer discards the backlog and marks recovery.
+        queue.offer(VideoJob.Frame(byteArrayOf(6)))
+        assertEquals(VideoJob.Resync, queue.poll(0))
+        assertEquals(1, (queue.poll(0) as VideoJob.Frame).nalus.size)
+        assertNull(queue.poll(0))
+        // Counters must have dropped with the polls: two fresh frames fit without recovery.
+        queue.offer(VideoJob.Frame(byteArrayOf(7, 8, 9)))
+        queue.offer(VideoJob.Frame(byteArrayOf(10, 11)))
+        assertEquals(3, (queue.poll(0) as VideoJob.Frame).nalus.size)
+        assertEquals(2, (queue.poll(0) as VideoJob.Frame).nalus.size)
+        assertNull(queue.poll(0))
+    }
+
+    @Test fun blockedPollWakesWhenAnotherThreadOffers() {
+        val queue = VideoDecodeQueue()
+        val frame = VideoJob.Frame(byteArrayOf(9))
+        val poller = Thread {
+            val got = queue.poll(2_000)
+            assertSame(frame, got)
+        }
+        poller.start()
+        // Give the poller time to enter awaitNanos before the offer signals it.
+        Thread.sleep(50)
+        queue.offer(frame)
+        poller.join(2_000)
+        assertFalse("poller did not observe the offer", poller.isAlive)
     }
 
     @Test fun stalledDecoderHasFiniteWaitAndShutdownCancelsImmediately() {
