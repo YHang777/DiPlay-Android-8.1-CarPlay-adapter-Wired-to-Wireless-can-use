@@ -4,7 +4,7 @@
 
 **CarPlay for compatible Android head units.** Wired and wireless.
 
-[Original Author](https://shihabal3amri.github.io/DiPlay/) · [Release]((https://github.com/YHang777/DiPlay-Android-8.1-CarPlay-adapter-Wired-to-Wireless-can-use/releases/tag/v0.2.11-xuda)) · 
+[Original Author](https://shihabal3amri.github.io/DiPlay/) · [Release](https://github.com/YHang777/DiPlay-Android-8.1-CarPlay-adapter-Wired-to-Wireless-can-use/releases/tag/v0.2.11-xuda) · 
 
 **This fork** — [YHang777/DiPlay-Android-9](https://github.com/YHang777/DiPlay-Android-9) — carries 0.2.11 plus [wireless CarPlay on an external Wi-Fi network](#wireless-carplay-on-an-external-wi-fi-network) and the [audio corrections](#audio-over-a-client-wi-fi-link) that mode needs.
 
