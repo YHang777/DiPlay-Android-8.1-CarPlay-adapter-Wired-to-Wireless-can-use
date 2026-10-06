@@ -1,8 +1,8 @@
 # DiPlay
 
-**CarPlay for compatible BYD Android head units.** Wired and wireless, with the familiar DiAuto interface. Independent app: `com.shihab.diplay`.
+**Modified for own head unit (Android 8.1 and using XUDA car adapter as hotspot to make audio consistent)
 
-> **BYD support scope:** These projects focus on BYD cars. They may work on other brands, but other brands are unsupported and there are no plans to add support or fix brand-specific incompatibilities.
+**CarPlay for compatible Android head units.** Wired and wireless, with the familiar DiAuto interface. Independent app: `com.shihab.diplay`.
 
 [Download & website](https://shihabal3amri.github.io/DiPlay/) · [Release](https://github.com/shihabal3amri/DiPlay/releases/tag/v0.2.11) · [Report a problem](https://github.com/shihabal3amri/DiPlay/issues/new/choose)
 
@@ -15,7 +15,6 @@
 Install on the **car**, not the iPhone. No jailbreak, dongle, Mac, account or authentication server is required for use. Core CarPlay does not require ADB; optional dashboard, battery, wheel-speed and parked-video features do. Your head unit must permit APK installation. Wireless supports Wi-Fi Direct, the car’s existing hotspot, or any access point this device can join; Wi-Fi Direct requires Android 10+; the APK supports Android 8.1+ for wired use.
 
 - Wired USB and wireless CarPlay with local authentication.
-- BYD HUD navigation with arrows, distance and street names on verified firmware.
 - Car hotspot support, improved audio buffering and saved receive diagnostics.
 - Automatic address discovery, fixed-channel Wi-Fi fallbacks and successful-configuration memory.
 - Icon/text size, resolution and frame rate; applying a display change reconnects CarPlay.
