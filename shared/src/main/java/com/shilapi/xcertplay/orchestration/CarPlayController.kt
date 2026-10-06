@@ -101,6 +101,8 @@ sealed class CarPlayStatus {
     data object RequestingMfiPermission : CarPlayStatus()
     data object MfiReady : CarPlayStatus()
     data object StartingHotspot : CarPlayStatus()
+    /** This device is moving its Wi-Fi client onto an access point that already exists. */
+    data object JoiningConfiguredNetwork : CarPlayStatus()
     data class HotspotReady(
         val ssid: String,
         val band: String,
@@ -1815,7 +1817,57 @@ class CarPlayController(
         } else {
             config.wirelessHotspotMode
         }
-        if (com.shilapi.xcertplay.network.CarHotspotSettings.shouldEnable(
+        // The configured manual network may be an access point this device joins as a client, or a
+        // network an external USB bridge already hands this device. Starting the local SoftAP would
+        // evict the first and is pointless for the second, so it is skipped whenever either
+        // carries the session.
+        val configuredSsid = config.manualHotspotSsid.orEmpty()
+        val onBridgedNetwork = com.shilapi.xcertplay.network.UsbNetworkBridge.isLive()
+        val stationSsid = com.shilapi.xcertplay.network.ManualHotspotStation.connectedSsid(appContext)
+        debugLog(
+            "wireless network: station='$stationSsid' configured='$configuredSsid' " +
+                "bridged=$onBridgedNetwork mode=$hotspotMode",
+        )
+        // A client already associated to some other network proves the configured network is an
+        // access point this device must join rather than one it hosts, since the two are mutually
+        // exclusive on a single radio. Joining it is what puts this device on the peer's subnet:
+        // advertising a network this device is not a member of sends the iPhone to an address that
+        // never answers, which is the stuck opening state this is here to prevent. Nothing below
+        // is allowed to run until the association has actually landed.
+        if (hotspotMode == WirelessHotspotMode.MANUAL &&
+            configuredSsid.isNotBlank() &&
+            stationSsid != null &&
+            stationSsid != configuredSsid &&
+            !onBridgedNetwork
+        ) {
+            onStatus(CarPlayStatus.JoiningConfiguredNetwork)
+            val requested = com.shilapi.xcertplay.network.ManualHotspotStation.associate(
+                appContext, configuredSsid, config.manualHotspotPassphrase.orEmpty(), ::debugLog,
+            )
+            if (!requested ||
+                !com.shilapi.xcertplay.network.ManualHotspotStation.awaitConnected(
+                    appContext, configuredSsid, WIFI_ASSOCIATION_TIMEOUT_MILLIS,
+                )
+            ) {
+                val current = com.shilapi.xcertplay.network.ManualHotspotStation
+                    .connectedSsid(appContext) ?: "no network"
+                val visible = com.shilapi.xcertplay.network.ManualHotspotStation
+                    .visibleSsids(appContext)
+                    ?.joinToString(prefix = "[", postfix = "]")
+                    ?.takeIf { it.length > 2 && it.length <= 300 }
+                throw IOException(
+                    "This device is on Wi-Fi '$current' but the session needs '$configuredSsid'." +
+                        (if (visible != null) " Visible networks: $visible." else "") +
+                        " Join '$configuredSsid' in this device's Wi-Fi settings, or correct the " +
+                        "hotspot SSID in DiPlay settings, and connect again.",
+                )
+            }
+            debugLog("Joined Wi-Fi '$configuredSsid'; the session runs on that network")
+        }
+        val onConfiguredNetwork = com.shilapi.xcertplay.network.ManualHotspotStation.isConnectedTo(
+            appContext, configuredSsid,
+        )
+        if (!onConfiguredNetwork && !onBridgedNetwork && com.shilapi.xcertplay.network.CarHotspotSettings.shouldEnable(
                 appContext, config.transport == CarPlayTransport.WIRELESS, hotspotMode,
             )
         ) {
@@ -1831,7 +1883,14 @@ class CarPlayController(
                 throw IOException("${result.diagnostic}. Open the car hotspot settings and connect again.")
             }
         }
+        // Only a deployment with no network at all needs the car hotspot: when the client radio is
+        // on, the SoftAP is off by design and stays off until association completes, and when an
+        // external USB bridge is live the session runs on the network it provides. Demanding the
+        // SoftAP in either case would abort before the network that carries the session is used.
         if (hotspotMode == WirelessHotspotMode.MANUAL &&
+            !onConfiguredNetwork &&
+            !onBridgedNetwork &&
+            !com.shilapi.xcertplay.network.ManualHotspotStation.clientEnabled(appContext) &&
             com.shilapi.xcertplay.network.CarHotspotStatus.isEnabled(appContext) == false
         ) {
             throw IOException("The car hotspot is off. Turn it on in the car settings and connect again.")
@@ -2279,6 +2338,8 @@ class CarPlayController(
             "STEP mfi/ready: MFi authentication provider is ready"
         CarPlayStatus.StartingHotspot ->
             "STEP wifi/ap: starting the wireless CarPlay access point"
+        CarPlayStatus.JoiningConfiguredNetwork ->
+            "STEP wifi/sta: joining the configured access point as a client"
         is CarPlayStatus.HotspotReady ->
             "STEP wifi/ap-ready: backend=$backend ssid=$ssid band=$band " +
                 "channel=$channel bssid=$bssid address=$address"
@@ -2322,6 +2383,12 @@ class CarPlayController(
         private const val IAP2_IPHONE_UUID = "00000000-deca-fade-deca-deafdecacafe"
         private const val HOTSPOT_START_TIMEOUT_MILLIS = 60_000L
         private const val WIFI_P2P_START_TIMEOUT_MILLIS = 20_000L
+
+        // Association itself takes seconds, but Android may ask the user to allow the network
+        // before it starts and DHCP then needs a few more. This is still a bounded diagnostic
+        // wait: a network this device cannot reach fails long before it, and the reason is
+        // reported instead of an interface that never appears.
+        private const val WIFI_ASSOCIATION_TIMEOUT_MILLIS = 25_000L
         private const val PAIR_TIMEOUT_MILLIS = 5 * 60_000L
         private const val VPN_CONNECT_TIMEOUT_MILLIS = 10_000L
         private const val CONTROL_LOOP_TIMEOUT_MILLIS = 5 * 60_000L

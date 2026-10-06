@@ -181,6 +181,7 @@
     <string name="diagnostic_report_saved">Diagnostic report saved</string>
     <string name="diagnostics">Diagnostics</string>
     <string name="diplay">DiPlay</string>
+    <string name="diplay_can_join_a_network_that_is_already_there">DiPlay can join a Wi-Fi network that already exists — a car hotspot, or a CarPlay bridge such as the XUDA — instead of opening its own hotspot. Give it the network in settings and it joins as a client.\n\nThe iPhone reaches that same network and DiPlay hosts the CarPlay session on it, so the outside device only has to supply the network. Pairing, AirPlay and the interface all stay in DiPlay, and nothing about the outside device is changed. Wi-Fi Direct and the car hotspot are unaffected.\n\nAudio packets are put back in RTP order before they are decoded, and the Wi-Fi radio is held awake for the whole session, so playback stays smooth when the network hands the data over in bursts.</string>
     <string name="discard_changes_and_exit_settings">Discard changes and exit settings</string>
     <string name="disconnect">Disconnect</string>
     <string name="discovering_iphone">Discovering iPhone</string>
@@ -194,6 +195,7 @@
     <string name="enable_the_car_s_bluetooth_and_pair_your_iphone_first">Enable the car’s Bluetooth and pair your iPhone first.</string>
     <string name="error">Error</string>
     <string name="exit_application">EXIT APPLICATION</string>
+    <string name="external_wifi_network_mode">External Wi-Fi network mode</string>
     <string name="finish_setup_save_your_hotspot_details_to_use_this_mode">Finish setup · Save your hotspot details to use this mode.</string>
     <string name="follow_instrument_theme_and_map_card">Follow instrument theme and map card</string>
     <string name="frame_rate">Frame rate</string>
@@ -230,6 +232,8 @@
     <string name="in_carplay_swipe_down_with_three_fingers_to_open_diplay_se">In CarPlay, swipe down with three fingers to open DiPlay settings.</string>
     <string name="instrument_contrast">Instrument contrast</string>
     <string name="instrument_theme">Instrument theme</string>
+    <string name="join_the_car_s_wi_fi_network_in_this_device_s_settings_to_connect">This device isn’t on the car’s Wi-Fi network. Open DiPlay settings, check the hotspot SSID, join that network, then connect again.</string>
+    <string name="joining_the_car_s_wi_fi_network">Joining the car’s Wi-Fi network…</string>
     <string name="keep_bluetooth_and_wi_fi_on_your_iphone_pair_with_the_car">Keep Bluetooth and Wi-Fi on your iPhone. Pair with the car’s Bluetooth, then select your iPhone here. Allow Nearby devices when asked.</string>
     <string name="keep_your_iphone_nearby_with_bluetooth_and_wi_fi_on_allow">Keep your iPhone nearby with Bluetooth and Wi-Fi on.\nAllow CarPlay if your iPhone asks.</string>
     <string name="later">Later</string>

@@ -29,8 +29,14 @@ object IphoneCarPlayConfiguration {
 
     fun find(device: UsbDevice): UsbConfiguration? {
         val configurations = (0 until device.configurationCount).map(device::getConfiguration)
+        // CDC NCM is the shape a real iPhone exposes and stays the preferred match, so nothing
+        // changes for a device that has it. The last alternative exists for a CarPlay bridge that
+        // reports Apple's own Ethernet function instead: it still carries usbmux plus a bulk pair,
+        // which is all the session needs, and requiring NCM there rejects every configuration and
+        // leaves the device with no data path at all.
         val chosen = configurations.firstOrNull { usbMuxInterface(it) != null && hasCdcNcm(it) && hasAppleEthernet(it) }
             ?: configurations.firstOrNull { usbMuxInterface(it) != null && hasCdcNcm(it) }
+            ?: configurations.firstOrNull { usbMuxInterface(it) != null && hasAppleEthernet(it) }
         Log.i(
             TAG,
             "carplay config chosen=${chosen?.id} " +

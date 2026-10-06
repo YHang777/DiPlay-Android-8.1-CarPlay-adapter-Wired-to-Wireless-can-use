@@ -29,7 +29,30 @@ object NcmFunctionDiscovery {
     )
 
     fun find(configuration: UsbConfiguration): NcmFunction? {
-        return findCdcNcm(configuration)
+        return findCdcNcm(configuration) ?: findAppleEthernet(configuration)
+    }
+
+    /**
+     * Apple's Ethernet function, reported by CarPlay bridges that do not publish CDC NCM.
+     *
+     * It keeps the same shape NCM has: the interface id is claimed once, its zero alternate
+     * setting is the endpoint-less control setting, and the numbered alternate carries the bulk
+     * pair. [NcmUsbBridge.open] already handles control and data sharing one interface id, so this
+     * only supplies the descriptors it was never given for such a device.
+     */
+    private fun findAppleEthernet(configuration: UsbConfiguration): NcmFunction? {
+        val apple = interfaces(configuration).filter {
+            it.interfaceClass == APPLE_ETHERNET_CLASS &&
+                it.interfaceSubclass == APPLE_ETHERNET_SUBCLASS &&
+                it.interfaceProtocol == APPLE_ETHERNET_PROTOCOL
+        }
+        val control = apple.firstOrNull { it.alternateSetting == 0 } ?: apple.firstOrNull()
+            ?: return null
+        val data = apple.filter { bulkEndpoints(it) != null }
+            .minByOrNull { if (it.alternateSetting == DATA_ALTERNATE_SETTING) 0 else 1 }
+            ?: return null
+        val endpoints = bulkEndpoints(data) ?: return null
+        return NcmFunction(control, data, null, endpoints.first, endpoints.second)
     }
 
     private fun findCdcNcm(configuration: UsbConfiguration): NcmFunction? {

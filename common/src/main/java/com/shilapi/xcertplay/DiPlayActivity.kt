@@ -784,14 +784,27 @@ class DiPlayActivity : ComponentActivity() {
         section(content, "${getString(R.string.about_public_preview_prefix)}${version()}") { card ->
             card.addView(label(getString(R.string.an_independent_carplay_receiver_for_android_head_units_wir), 17, TEXT))
         }
+        section(content, getString(R.string.external_wifi_network_mode)) { card ->
+            card.addView(label(getString(R.string.diplay_can_join_a_network_that_is_already_there), 17, TEXT))
+        }
         section(content, getString(R.string.made_possible_by_open_source)) { card ->
             card.addView(label(getString(R.string.receiver_based_on_xcertplay_licensed_under_gpl_3_0_diplay), 16, MUTED))
         }
     }
 
     // An opted-in connection prepares the hotspot in the controller instead of stopping at this reminder.
+    // Joining the configured network as a client is a valid manual deployment on its own: the local
+    // SoftAP is off there by design, and it also stays off for the moments before association
+    // completes, so neither state may be reported as a missing hotspot.
     private fun carHotspotOff(): Boolean =
         AirPlayPersistence.loadWirelessHotspotMode(this) == WirelessHotspotMode.MANUAL &&
+            !com.shilapi.xcertplay.network.ManualHotspotStation.isConnectedTo(
+                this, AirPlayPersistence.loadManualHotspotSsid(this),
+            ) &&
+            // An external USB bridge already supplies the network the session runs on, so the
+            // local SoftAP being off there is the normal state rather than a missing hotspot.
+            !com.shilapi.xcertplay.network.UsbNetworkBridge.isLive() &&
+            !com.shilapi.xcertplay.network.ManualHotspotStation.clientEnabled(this) &&
             com.shilapi.xcertplay.network.CarHotspotStatus.isEnabled(this) == false &&
             !(CarHotspotSettings.enabled(this) && CarHotspotTethering.permitted(this))
 

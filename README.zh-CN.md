@@ -6,9 +6,11 @@
 
 [下载与中文网站](https://shihabal3amri.github.io/DiPlay/zh-Hans/) · [0.2.11 版本](https://github.com/shihabal3amri/DiPlay/releases/tag/v0.2.11) · [完整说明](README.md) · [报告问题](https://github.com/shihabal3amri/DiPlay/issues/new/choose)
 
+**本分支** — [YHang777/DiPlay-Android-9](https://github.com/YHang777/DiPlay-Android-9) — 在 0.2.11 之上增加在外部 Wi-Fi 网络上运行无线 CarPlay，以及该模式所需的音频修正，见下文。
+
 ## 0.2.11 — 公开预览版
 
-请安装在车机上，而非 iPhone。无需越狱、转接盒、账户或认证服务器。最低支持 Android 9；Wi-Fi Direct 需要 Android 10 或更高版本，也可使用车机内置热点或 USB。有线及无线 CarPlay 核心连接不要求 ADB，可选车辆数据等功能需要已授权的网络 ADB。
+请安装在车机上，而非 iPhone。无需越狱、转接盒、账户或认证服务器。最低支持 Android 8.1；Wi-Fi Direct 需要 Android 10 或更高版本，也可使用车机内置热点、外部 Wi-Fi 网络或 USB。有线及无线 CarPlay 核心连接不要求 ADB，可选车辆数据等功能需要已授权的网络 ADB。
 
 ### 0.2.11 新增与修正
 
@@ -31,3 +33,29 @@
 这是公开预览版，**未经 Apple 认证**。APK 使用从公开 Carlinkit 固件中提取的既有实验性配件身份，并非为 DiPlay 新签发的 MFi 身份；其中的私钥可被提取，未来 iOS 是否继续接受及其公开分发适用性尚未确定。Android 签名密钥和配件身份不进入 Git 或源代码压缩包；普通源代码/CI 构建默认不配置身份。部分车机仍可能卡顿或无法应用图标大小设置。
 
 标准导航小组件需要支持 Android 小组件的启动器；比亚迪内置主页不接受任意小组件。悬浮地图和嵌入地图需要启用“CarPlay 仪表地图”。应用及网站支持英语、简体中文、阿拉伯语、俄语、乌克兰语和西班牙语。源代码、构建说明及许可证随版本提供。
+
+## 在外部 Wi-Fi 网络上运行无线 CarPlay
+
+DiPlay 通常自己开启热点并等待 iPhone 加入。有些环境已经有现成网络——车内热点，或一个为手机建立自身 Wi-Fi 与蓝牙的 CarPlay 转接盒。此时网络可由外部提供，DiPlay 只需在其上承载会话。
+
+- **DiPlay 以客户端身份加入网络。** 配置的无线网络可以是已存在的接入点，而不是 DiPlay 自己的 SoftAP。DiPlay 通过 Android 的对等网络请求完成关联，并将其保存为网络建议；关联失败时会列出实际能扫描到的 SSID。已关联期间不会要求本机热点，因为在单射频固件上客户端接口与 SoftAP 互斥。
+- **会话按 DiPlay 实际持有的地址发布。** 从活动链路读取客户端地址并用于 AirPlay 广播，而不是 SoftAP 的默认地址，iPhone 到监听端口的连接才能真正到达。
+- **外部设备只提供网络。** 配对、AirPlay、RTP、媒体与界面全部在 DiPlay 内完成；转接盒只需转发流量，DiPlay 不会修改或重新配置它。
+- **清单中声明了 `CHANGE_NETWORK_STATE`**，供对等网络请求使用——缺少该权限时 Android 会拒绝 `requestNetwork`。它属于普通权限，安装即授予，不会弹窗。
+
+Wi-Fi Direct、车内热点与有线 USB 路径保持不变；自建热点也不会持有 Wi-Fi 锁。
+
+## 客户端 Wi-Fi 链路上的音频
+
+只有当 DiPlay 是 Wi-Fi 客户端而非接入点时才会出现的两个缺陷，均已修复：
+
+- **音频包在解码前先按顺序重排。** RTP 可能乱序送达；按到达顺序播放会让声音向前猛跳再回退，这正是“音频有时变快”的听感。现在每个流都会按 RTP 时间戳顺序（跨越 32 位回绕点）缓存并派发，重复包与已播放过的包被丢弃，帧步长只允许向下修正，因此真正的丢包绝不会被误认为帧大小。持续出现无法填补的空洞的流会放弃重排、回到到达顺序，而不是卡住；帧大小可变的编解码器则完全跳过重排。乱序是被验证而非假定的：没有前向间隙事件就是丢包，前向间隙计数与迟到/重复计数相等才是乱序。
+- **整个会话期间持有 Wi-Fi 锁**——Android 10 及以上使用 `WIFI_MODE_FULL_LOW_LATENCY`，更早版本使用 `WIFI_MODE_FULL_HIGH_PERF`——使客户端射频保持唤醒，不会在信标之间缓存数据。锁在创建 sink 时获取，在 `close()` 时释放。
+
+实时会话可在 `Audio: media stats` 中看到 `orderOn`、`orderStep`、`held`、`heldMax`、`stale`、`gaveUp`。
+
+## 本构建的其他改动
+
+- `common`、`mobile`、`shared` 的 **minSdk 降至 27**（Android 8.1），NDK 的 `APP_PLATFORM` 同步调整。
+- **有线 USB 接口发现**新增回退路径（Apple Ethernet 与 NCM）。
+- **`gradlew.bat`** 不再传入空的 `-classpath` 参数。

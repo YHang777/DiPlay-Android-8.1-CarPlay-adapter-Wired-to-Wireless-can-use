@@ -2,6 +2,11 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Asked for by the peer-network request that joins an external access point: Android
+         refuses ConnectivityManager.requestNetwork without it, which is the one path that can
+         move this device onto the network the session must run on. Normal protection level, so
+         it is granted at install and never prompted for. -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />

@@ -4234,11 +4234,18 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun friendlyStage(message: String): String = when {
         message == getString(R.string.waiting_for_mfi_coprocessor) ||
             message == getString(R.string.requesting_mfi_usb_permission) -> message
+        message.contains("Joining the car", true) -> message
         message.contains("Turn on Wi-Fi", true) -> getString(R.string.turn_on_wi_fi_in_the_head_unit_s_settings_to_connect)
         message.contains("Allow precise Location", true) -> getString(R.string.allow_precise_location_for_diplay_in_the_head_unit_s_app_p)
         message.contains("Allow Nearby devices", true) -> getString(R.string.allow_nearby_devices_for_diplay_in_the_head_unit_s_app_per)
         message.contains("createGroup failed", true) -> getString(R.string.the_head_unit_couldn_t_start_carplay_wi_fi_check_wi_fi_and)
         message.contains("needs a reset", true) -> getString(R.string.a_previous_wi_fi_direct_connection_is_still_running_reset)
+        // The join failure names the configured and the visible networks, which is the whole
+        // diagnosis. Without this branch it falls through to the generic "Getting CarPlay
+        // ready…" and the one correction that would start the session never reaches the screen.
+        message.contains("the session needs", true) ||
+            message.contains("has not joined", true) ->
+            getString(R.string.join_the_car_s_wi_fi_network_in_this_device_s_settings_to_connect)
         message.contains("socket", true) || message.contains("RFCOMM", true) -> getString(R.string.your_iphone_isn_t_available_unlock_it_and_check_bluetooth)
         message.contains("unsupported", true) || message.contains("not supported", true) -> getString(R.string.this_head_unit_may_not_support_wireless_carplay_try_a_usb)
         message.contains("denied", true) || message.contains("permission", true) -> getString(R.string.allow_the_connection_permission_to_continue)
@@ -4326,6 +4333,7 @@ class CarPlayHostActivity : ComponentActivity() {
         CarPlayStatus.RequestingMfiPermission -> getString(R.string.requesting_mfi_usb_permission)
         CarPlayStatus.MfiReady -> getString(R.string.mfi_authentication_ready)
         CarPlayStatus.StartingHotspot -> getString(R.string.starting_wireless_hotspot)
+        CarPlayStatus.JoiningConfiguredNetwork -> getString(R.string.joining_the_car_s_wi_fi_network)
         is CarPlayStatus.HotspotReady ->
             getString(R.string.status_hotspot_ready, backend, ssid, band, if (channel == 0) getString(R.string.auto_value) else channel.toString())
         CarPlayStatus.WaitingForPairedIphone -> getString(R.string.waiting_for_paired_iphone)

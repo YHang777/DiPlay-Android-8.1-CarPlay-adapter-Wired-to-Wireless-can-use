@@ -75,20 +75,61 @@ class ManualHotspotManager(
         require(timeoutMillis > 0) { "timeoutMillis must be positive" }
 
         val deadlineNanos = deadlineAfter(timeoutMillis)
-        val apConfiguration = readApConfiguration()
-        if (apConfiguration != null && apConfiguration.ssid != expectedSsid) {
-            throw IOException(
-                "Manual hotspot SSID does not match the active local AP configuration: " +
-                    "'${apConfiguration.ssid}'",
+        // A different local AP SSID is not an error: the configured credentials may describe an
+        // access point this device joins as a client rather than this device's own SoftAP, which
+        // is exactly the deployment the caller asked for. Only a matching local AP is validated
+        // and read for channel/security; otherwise the configured network stays authoritative.
+        val reportedApConfiguration = readApConfiguration()
+        val apConfiguration = reportedApConfiguration?.takeIf { it.ssid == expectedSsid }
+        if (reportedApConfiguration != null && apConfiguration == null) {
+            onDiagnostic(
+                "local AP SSID '${reportedApConfiguration.ssid}' differs from configured " +
+                    "'$expectedSsid'; using the configured network",
             )
         }
         validateApConfiguration(apConfiguration)
 
-        var lastReason = "local hotspot interface was not found"
+        // A client associated to some other network, with no local AP carrying the configured
+        // SSID, proves this device is a member of a different network from the one the peer was
+        // told to join. Binding any local interface there advertises an address on the wrong
+        // subnet, so the SoftAP fallback is withheld and the wait is reported as what it is.
+        val onOtherNetwork = apConfiguration == null &&
+            ManualHotspotStation.connectedSsid(appContext)
+                ?.let { it != expectedSsid } == true
+
+        var lastReason = "the configured network interface was not found"
+        if (onOtherNetwork) {
+            lastReason = "this device has not joined '$expectedSsid'"
+        }
+        var bridgeDeadlineNanos = 0L
         while (true) {
             check(!closed) { "ManualHotspotManager is closed" }
-            val localInterface = findLocalHotspotInterface()
-            if (localInterface != null) {
+            // An external bridge that hands this device its network outranks everything: it is the
+            // only interface the iPhone can reach, so the SoftAP must not be bound instead.
+            val bridge = bridgeInterface()
+            val station = stationInterface()
+            val localInterface = when {
+                bridge != null -> bridge
+                station != null -> station
+                onOtherNetwork -> null
+                else -> findLocalHotspotInterface()
+            }
+            if (onOtherNetwork && bridge == null) {
+                lastReason = "this device has not joined '$expectedSsid' (it is on " +
+                    "'${ManualHotspotStation.connectedSsid(appContext) ?: "no network"}')"
+            }
+
+            // The adapter can enumerate after this device starts bringing the session up. Binding
+            // the SoftAP in that window pins the whole session to an unreachable address, so the
+            // fallback waits briefly for the bridge instead of settling on the first candidate.
+            val bridgeStarting = bridge == null && UsbNetworkBridge.isPresent()
+            if (bridgeStarting && bridgeDeadlineNanos == 0L) {
+                bridgeDeadlineNanos = System.nanoTime() + BRIDGE_GRACE_NANOS
+            }
+            val waitingForBridge = bridgeStarting && System.nanoTime() < bridgeDeadlineNanos
+            if (waitingForBridge) lastReason = "the USB bridge interface has no usable address yet"
+
+            if (localInterface != null && !waitingForBridge) {
                 val connectionFrequency = frequencyFromConnectionInfo()
                 val scanFrequency = frequencyFromScanResult(localInterface)
                 val channel = observedManualHotspotChannel(
@@ -104,7 +145,13 @@ class ManualHotspotManager(
                     else -> null
                 }
                 val security = apConfiguration?.security ?: expectedSecurity
-                onDiagnostic("Manual hotspot configReadable=${apConfiguration != null} " +
+                val path = when {
+                    bridge != null -> "bridge"
+                    station != null -> "station"
+                    else -> "localAp"
+                }
+                onDiagnostic("Manual hotspot path=$path " +
+                    "configReadable=${apConfiguration != null} " +
                     "security=$security channelKnown=${channel > 0} " +
                     "hardwareAddressKnown=${localInterface.hardwareAddress != null} iface=${localInterface.name} " +
                     "family=${if (localInterface.hostAddress is Inet6Address) "IPv6" else "IPv4"}")
@@ -197,6 +244,86 @@ class ManualHotspotManager(
             ManualHotspotBand.AUTO -> Unit
         }
     }
+
+    /**
+     * The interface an external bridge hands this device, or null when no bridge is carrying a
+     * network.
+     *
+     * [findLocalHotspotInterface] excludes the active network because it targets this device's own
+     * SoftAP, which is the opposite of what a bridge needs: the bridged interface often *is* the
+     * active one, and it is the only address the iPhone can reach. Selecting it here is what lets
+     * DiPlay host the session on the network the adapter provides.
+     */
+    private fun bridgeInterface(): LocalHotspotInterface? {
+        val name = UsbNetworkBridge.liveInterface() ?: return null
+        val interfaces = try {
+            NetworkInterface.getNetworkInterfaces()
+        } catch (_: SocketException) {
+            null
+        } ?: return null
+        return Collections.list(interfaces)
+            .asSequence()
+            .filter { it.name == name }
+            .mapNotNull { networkInterface ->
+                networkInterface.hotspotAddress()?.let { address ->
+                    LocalHotspotInterface(
+                        name = networkInterface.name,
+                        hostAddress = address,
+                        hardwareAddress = runCatching { networkInterface.hardwareAddress?.toMacAddressString() }
+                            .getOrNull()?.takeUnless { it == "02:00:00:00:00:00" || it == "00:00:00:00:00:00" },
+                        // Outranks the SoftAP: only the bridged network reaches the iPhone.
+                        score = interfaceScore(networkInterface.name, address) + BRIDGE_SCORE_BONUS,
+                    )
+                }
+            }
+            .maxByOrNull(LocalHotspotInterface::score)
+    }
+
+    /**
+     * The interface carrying the configured network while this device is a client on it.
+     *
+     * That interface is the active network, which [findLocalHotspotInterface] deliberately
+     * excludes because it targets this device's own SoftAP. An external access point needs the
+     * opposite selection: without it DiPlay would advertise the SoftAP address the iPhone cannot
+     * reach, or find no interface at all once the SoftAP is gone.
+     */
+    private fun stationInterface(): LocalHotspotInterface? {
+        if (!ManualHotspotStation.isConnectedTo(appContext, expectedSsid)) return null
+        val activeInterface = activeInterfaceName()
+        val interfaces = try {
+            NetworkInterface.getNetworkInterfaces()
+        } catch (_: SocketException) {
+            null
+        } ?: return null
+        return Collections.list(interfaces)
+            .asSequence()
+            .filter { networkInterface ->
+                try {
+                    !networkInterface.isLoopback && networkInterface.isUp &&
+                        EXCLUDED_INTERFACE_PREFIXES.none { networkInterface.name.startsWith(it) } &&
+                        (networkInterface.name == activeInterface ||
+                            networkInterface.name.startsWith("wlan"))
+                } catch (_: SocketException) {
+                    false
+                }
+            }
+            .mapNotNull { networkInterface ->
+                networkInterface.hotspotAddress()?.let { address ->
+                    LocalHotspotInterface(
+                        name = networkInterface.name,
+                        hostAddress = address,
+                        hardwareAddress = runCatching { networkInterface.hardwareAddress?.toMacAddressString() }
+                            .getOrNull()?.takeUnless { it == "02:00:00:00:00:00" || it == "00:00:00:00:00:00" },
+                        // Outranks every SoftAP candidate: only the configured network is usable.
+                        score = interfaceScore(networkInterface.name, address) + STATION_SCORE_BONUS,
+                    )
+                }
+            }
+            .maxByOrNull(LocalHotspotInterface::score)
+    }
+
+    private fun activeInterfaceName(): String? = connectivityManager?.activeNetwork
+        ?.let { connectivityManager.getLinkProperties(it)?.interfaceName }
 
     private fun findLocalHotspotInterface(): LocalHotspotInterface? {
         val interfaces = try {
@@ -433,7 +560,12 @@ class ManualHotspotManager(
     private companion object {
         const val TAG = "xcertplay-usb"
         const val NANOS_PER_MILLISECOND = 1_000_000L
+        const val STATION_SCORE_BONUS = 1_000
+        const val BRIDGE_SCORE_BONUS = 1_000
         val INTERFACE_POLL_NANOS: Long = TimeUnit.MILLISECONDS.toNanos(250)
+        // Long enough for a USB adapter's network to come up, short enough not to delay a
+        // deployment that has no adapter attached at all.
+        val BRIDGE_GRACE_NANOS: Long = TimeUnit.SECONDS.toNanos(5)
         val EXCLUDED_INTERFACE_PREFIXES = listOf(
             "lo",
             "dummy",

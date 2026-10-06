@@ -6,11 +6,13 @@
 
 [Download & website](https://shihabal3amri.github.io/DiPlay/) · [Release](https://github.com/shihabal3amri/DiPlay/releases/tag/v0.2.11) · [Report a problem](https://github.com/shihabal3amri/DiPlay/issues/new/choose)
 
+**This fork** — [YHang777/DiPlay-Android-9](https://github.com/YHang777/DiPlay-Android-9) — carries 0.2.11 plus [wireless CarPlay on an external Wi-Fi network](#wireless-carplay-on-an-external-wi-fi-network) and the [audio corrections](#audio-over-a-client-wi-fi-link) that mode needs.
+
 ![DiPlay home](site/assets/home.png)
 
 ## 0.2.11 — public preview
 
-Install on the **car**, not the iPhone. No jailbreak, dongle, Mac, account or authentication server is required for use. Core CarPlay does not require ADB; optional dashboard, battery, wheel-speed and parked-video features do. Your head unit must permit APK installation. Wireless supports Wi-Fi Direct or the car’s existing hotspot; Wi-Fi Direct requires Android 10+; the APK supports Android 9+ for wired use.
+Install on the **car**, not the iPhone. No jailbreak, dongle, Mac, account or authentication server is required for use. Core CarPlay does not require ADB; optional dashboard, battery, wheel-speed and parked-video features do. Your head unit must permit APK installation. Wireless supports Wi-Fi Direct, the car’s existing hotspot, or any access point this device can join; Wi-Fi Direct requires Android 10+; the APK supports Android 8.1+ for wired use.
 
 - Wired USB and wireless CarPlay with local authentication.
 - BYD HUD navigation with arrows, distance and street names on verified firmware.
@@ -39,6 +41,32 @@ Earlier releases were tested on the development DiLink5.1 car: live windshield g
 Optional legacy vehicle data, battery, wheel speed and parked video require authorized network ADB and supported readings. Dashboard, hotspot and audio effects depend on firmware and Android support. See [0.2.11 release notes](docs/RELEASE-NOTES-0.2.11.md) and [validation](docs/VALIDATION.md) for review corrections and device-test limits. Qin Plus startup, Wi-Fi Direct stutter, Siri/microphone quality, iOS 15 connection and day/night firmware reports still need fresh hardware evidence.
 
 If a problem remains, reproduce it on **0.2.11**, then use **Settings → Diagnostics → Save diagnostic report**. Android 10+ saves to **Downloads/DiPlay**; Android 9 uses the document picker. Review the `.txt` file and attach it to your existing [issue](https://github.com/shihabal3amri/DiPlay/issues), including vehicle/firmware, phone/iOS, connection mode, steps and failure time. Reports are shared only when you choose; never post your hotspot password.
+
+## Wireless CarPlay on an external Wi-Fi network
+
+DiPlay normally opens its own hotspot and waits for the iPhone to join it. Some setups already have a network in place — a car hotspot, or a CarPlay-bridging dongle that brings up its own Wi-Fi and Bluetooth for the phone. In that case the network can be supplied from outside and DiPlay only has to run the session on it.
+
+- **DiPlay joins the network as a client.** The configured wireless network may be an access point that already exists instead of DiPlay’s own SoftAP. DiPlay associates to it through Android’s peer-network request, remembers it as a network suggestion, and reports the SSIDs it can actually see when association fails. It never demands a local hotspot while it is associated, because on single-radio firmware the client interface and the SoftAP are mutually exclusive.
+- **The session is advertised on the address DiPlay really holds.** A client address is read from the live link and used for the AirPlay advertisement instead of the SoftAP default, so the iPhone’s connection to the listener actually arrives.
+- **The outside device only supplies the network.** Pairing, AirPlay, RTP, media and the UI all stay in DiPlay; the bridge has to do nothing but carry the traffic. Nothing about the bridge itself is modified or reconfigured.
+- **`CHANGE_NETWORK_STATE` is declared** for the peer-network request — Android refuses `requestNetwork` without it. It is a normal-level permission, granted at install and never prompted for.
+
+Wi-Fi Direct, the car hotspot and the wired USB path are unchanged, and a self-hosted hotspot never takes a Wi-Fi lock.
+
+## Audio over a client Wi-Fi link
+
+Two defects show up only when DiPlay is a Wi-Fi client rather than an access point, and both are fixed here:
+
+- **Audio packets are reordered before they are decoded.** RTP can be delivered out of order; playing in arrival order makes the audio lurch forward and then rewind, which is what “the audio speeds up” sounds like. Each stream is now held and dispatched in RTP timestamp order across the 32-bit wrap point, duplicates and already-played packets are dropped, and the frame step is corrected only downward so a genuine hole can never be mistaken for the frame size. A stream that keeps hitting unfilled holes gives up and returns to arrival order rather than stalling, and variable-frame codecs bypass ordering entirely. Reordering is confirmed rather than assumed: a forward-gap event that never arrives is a loss, and equality between the forward-gap and late/duplicate counters is a reorder.
+- **A Wi-Fi lock is held for the whole session** — `WIFI_MODE_FULL_LOW_LATENCY` on Android 10+, `WIFI_MODE_FULL_HIGH_PERF` before that — so the client radio stays awake instead of caching delivery between beacon wake-ups. The lock is acquired when a sink is created and released in `close()`.
+
+A live session reports both under `Audio: media stats`: `orderOn`, `orderStep`, `held`, `heldMax`, `stale`, `gaveUp`.
+
+## What else this build carries
+
+- **minSdk lowered to 27** (Android 8.1) in `common`, `mobile` and `shared`, with `APP_PLATFORM` matched in the NDK build.
+- **Wired USB interface discovery** gained fallbacks (Apple Ethernet and NCM paths) when bringing up the iPhone’s tethered network.
+- **`gradlew.bat`** no longer passes an empty `-classpath` argument.
 
 ## Documentation
 

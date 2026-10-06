@@ -9,6 +9,7 @@ import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaCodecList
 import android.media.MediaFormat
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -148,6 +149,19 @@ class AndroidMediaSink(
         audioFocusEnabled,
         onAudioDiagnostic,
     )
+
+    /**
+     * Holds the Wi-Fi radio in its awake state for as long as this session runs.
+     *
+     * A session this device hosts on its own access point never needs one: the radio is the
+     * access point and does not sleep. When the session instead runs on an access point this
+     * device merely joins as a client, the client radio may cache delivery between beacon
+     * wake-ups and hand an arriving burst over in one go a few hundred ms later. Signal strength
+     * looks perfect through that, and it only surfaces as gaps on *every* stream at once — audio
+     * and video stalling together while per-packet processing stays in single-digit
+     * milliseconds. The low-latency lock is the platform's answer to exactly that.
+     */
+    private val sessionWifiLock = acquireSessionWifiLock()
     private val screenStateLock = Any()
     private val activeScreenTypes = mutableSetOf<Int>()
     private val defaultSurface = surface
@@ -339,7 +353,31 @@ class AndroidMediaSink(
         }
     }
 
+    /**
+     * Takes a Wi-Fi lock for this session, or null when there is no radio to lock or the
+     * platform refuses. One acquire is balanced by one release in [close], and a sink that is
+     * never closed still lets go of the lock when the process goes.
+     */
+    @Suppress("DEPRECATION")
+    private fun acquireSessionWifiLock(): WifiManager.WifiLock? {
+        val manager = appContext?.getSystemService(WifiManager::class.java) ?: return null
+        val lock = runCatching {
+            // API 29 gave the awake lock a real-time mode that lets the chip drop power save;
+            // before that only the coarse high-performance mode exists.
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            manager.createWifiLock(mode, "DiPlay:carplay-session").apply { acquire() }
+        }.getOrNull()
+        Log.i("xcertplay-usb", "carplay Wi-Fi lock acquired=${lock != null} api=${Build.VERSION.SDK_INT}")
+        if (lock != null) runCatching { onAudioDiagnostic("Wi-Fi low-latency lock held for this session") }
+        return lock
+    }
+
     fun close() {
+        runCatching { sessionWifiLock?.release() }
         synchronized(screenStateLock) {
             activeScreenTypes.forEach { screenStreamActiveChanged?.invoke(it, false) }
             activeScreenTypes.clear()
@@ -546,7 +584,8 @@ private class VideoDecoder(
         MediaFormat.createVideoFormat(mime, width, height).apply {
             if (tuned) {
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_INPUT_SIZE)
-                setInteger(MediaFormat.KEY_PRIORITY, 0)
+                // "priority" is MediaFormat.KEY_PRIORITY (API 29); inlined so API 27 stays clean.
+                setInteger("priority", 0)
             }
             csd.forEachIndexed { index, bytes -> setByteBuffer("csd-$index", ByteBuffer.wrap(bytes)) }
         }
@@ -784,11 +823,58 @@ private class AudioRenderer(
     private val mediaBufferMillis: Int,
     private val report: (String) -> Unit,
 ) : Closeable {
-    private data class AudioPacket(val rtp: ByteArray, val sample: Int)
+    private data class AudioPacket(val rtp: ByteArray, val sample: Int, val sinceNs: Long = 0L)
 
     private var trackAttributes: AudioAttributes? = null
     private var mappedChannel: AudioChannel? = null
     private val queue = LinkedBlockingQueue<AudioPacket>(MAX_QUEUED_PACKETS)
+
+    /**
+     * Audio that has arrived but has not yet been handed to the decoder, in RTP timestamp order.
+     *
+     * A bridged access point can deliver UDP datagrams out of sequence, and both the decoder and
+     * the AudioTrack are strictly in order. Playing a packet that jumped its turn therefore
+     * sounds its content early and then plays the packets it passed again — a forward lurch of up
+     * to several frames that the listener hears as the track speeding up. [pending] holds the
+     * newer packet only until its predecessor lands, which costs nothing on a stream that is
+     * already ordered, and only ever engages on a stream that is not.
+     *
+     * Guard rails, in order of importance: a hold is abandoned after [REORDER_WAIT_NS] so a
+     * packet that is simply lost can never stall the stream; a packet older than what has already
+     * been decoded is dropped rather than allowed to rewind the timeline; and after
+     * [MAX_CONSECUTIVE_GIVE_UPS] holds that nothing ever filled, ordering is abandoned for the
+     * rest of the stream so a wrong frame-size assumption degrades to today's FIFO behaviour
+     * instead of stalling every packet.
+     */
+    private val pending = ArrayList<AudioPacket>()
+    /** RTP timestamp of the first packet seen; the sort key base, kept for the stream's life. */
+    private var anchorSample: Int? = null
+    /** Timestamp of the newest packet already handed to the decoder. */
+    private var lastDispatchedSample: Int? = null
+    /** Ordering is only safe for codecs whose frame size does not vary from packet to packet. */
+    private val orderingEligible = format.codec == AudioCodecKind.AAC_LC ||
+        format.codec == AudioCodecKind.OPUS
+
+    /**
+     * Timestamp distance from one packet to the next: 1024 samples for both eligible codecs.
+     *
+     * Seeded rather than learned, because the first gap on a stream could itself be a hole and
+     * adopting it would teach the decoder to expect the very jump we are trying to absorb. It is
+     * only ever corrected *downward*, which a real change in frame size forces and a hole never
+     * does.
+     */
+    private var expectedStepSamples: Long? = if (orderingEligible) INITIAL_STEP_SAMPLES else null
+    private var orderingDisabled = false
+    private var consecutiveGiveUps = 0
+    private var gaveUpTotal = 0
+    private var staleDroppedTotal = 0
+    private var maxHeldThisWindow = 0
+    private var reorderHoldLogged = false
+
+    /** True while this stream is being ordered: a fixed-frame codec that has not given up. */
+    private val orderingActive: Boolean
+        get() = orderingEligible && !orderingDisabled
+
     @Volatile private var running = true
     @Volatile private var started = false
     private var codec: MediaCodec? = null
@@ -877,7 +963,13 @@ private class AudioRenderer(
             requestAudioFocus()
             while (running) {
                 diagnosticStage = "packet"
-                queue.poll(AUDIO_POLL_MILLIS, TimeUnit.MILLISECONDS)?.let(::handle)
+                queue.poll(AUDIO_POLL_MILLIS, TimeUnit.MILLISECONDS)?.let(::accept)
+                while (running) {
+                    val next = queue.poll() ?: break
+                    accept(next)
+                }
+                diagnosticStage = "packet-order"
+                dispatchOrdered()
                 // Output becomes ready asynchronously, including after the last packet of a burst.
                 // Waiting for the next UDP packet can strand decoded sound for hundreds of ms.
                 diagnosticStage = "decoder-output"
@@ -1171,6 +1263,112 @@ private class AudioRenderer(
             .putLong(OPUS_SEEK_PRE_ROLL_NANOS)
             .array()
 
+    /**
+     * Places [packet] into [pending] by RTP timestamp rather than by arrival time.
+     *
+     * The sort runs against a fixed anchor taken from the first packet of the stream, so a
+     * timestamp that wraps past 2^32 keeps its place instead of jumping to the front. The list
+     * stays small — it only ever holds the tail of one delivery burst — so a linear insertion is
+     * cheaper than the bookkeeping a tree would need.
+     */
+    private fun accept(packet: AudioPacket) {
+        if (!orderingActive) {
+            // Nothing to order against — a variable-frame codec, or ordering that gave up on
+            // this stream. Deliver in arrival order, which is what this sink has always done.
+            handle(packet)
+            return
+        }
+        val base = anchorSample ?: packet.sample.also { anchorSample = it }
+        val key = ((packet.sample - base).toLong()) and 0xffff_ffffL
+        var index = pending.size
+        while (index > 0) {
+            val previous = pending[index - 1]
+            if ((((previous.sample - base).toLong()) and 0xffff_ffffL) <= key) break
+            index--
+        }
+        pending.add(index, packet.copy(sinceNs = System.nanoTime()))
+        if (pending.size > maxHeldThisWindow) maxHeldThisWindow = pending.size
+    }
+
+    /**
+     * Hands [pending] to the decoder oldest-first, holding the head only while the packet that
+     * should precede it is still missing.
+     *
+     * Called once per worker turn, so a held packet is re-examined against the wall clock on
+     * every poll without blocking the thread. In the ordinary case the head is already
+     * contiguous, so this dispatches immediately and the reorder path costs a single comparison.
+     */
+    private fun dispatchOrdered() {
+        val now = System.nanoTime()
+        while (pending.isNotEmpty()) {
+            val head = pending.removeAt(0)
+            val step = if (orderingActive) expectedStepSamples else null
+            val last = lastDispatchedSample
+            if (step == null || last == null) {
+                // Ordering is off (or this is the stream's first packet), so the only rule left
+                // is the one that has always applied: hand it to the decoder.
+                lastDispatchedSample = head.sample
+                handle(head)
+                continue
+            }
+            // Unsigned so the 32-bit timestamp space reads as ordered across its wrap point.
+            val delta = ((head.sample - last).toLong()) and 0xffff_ffffL
+            if (delta == 0L || delta >= 0x8000_0000L) {
+                // A duplicate has no new content, and anything older than what has already been
+                // decoded would rewind the timeline the AudioTrack is now playing forward.
+                staleDroppedTotal++
+                continue
+            }
+            if (delta < step) {
+                // A smaller forward gap proves the frame is smaller than assumed. Only downward
+                // ever counts: a larger gap is a hole, and adopting it as the step would teach
+                // the stream to jump straight over its missing predecessor.
+                expectedStepSamples = delta
+                Log.i(TAG, "audio reorder: frame step corrected $step -> $delta")
+                lastDispatchedSample = head.sample
+                handle(head)
+                consecutiveGiveUps = 0
+                continue
+            }
+            when {
+                delta == step -> {
+                    lastDispatchedSample = head.sample
+                    handle(head)
+                    consecutiveGiveUps = 0
+                }
+                now - head.sinceNs < REORDER_WAIT_NS -> {
+                    // The predecessor has not landed yet. Park the newer packet and look at it
+                    // again next turn; a reordering event inside a delivery burst clears in
+                    // milliseconds, and an ordered stream never reaches this branch at all.
+                    pending.add(0, head)
+                    if (!reorderHoldLogged) {
+                        reorderHoldLogged = true
+                        Log.i(TAG, "audio reorder: holding a packet for its predecessor (step=$step)")
+                    }
+                    return
+                }
+                else -> {
+                    // Nothing filled the hole in time. Play on rather than stall the stream, and
+                    // give up on ordering entirely if that is how every packet behaves — the
+                    // symptom of a frame-size assumption that never matched this stream.
+                    lastDispatchedSample = head.sample
+                    handle(head)
+                    gaveUpTotal++
+                    consecutiveGiveUps++
+                    if (consecutiveGiveUps >= MAX_CONSECUTIVE_GIVE_UPS) {
+                        orderingDisabled = true
+                        Log.w(
+                            TAG,
+                            "audio reorder: disabled after $consecutiveGiveUps unfilled holes; " +
+                                "falling back to arrival order (step=$step)",
+                        )
+                        report("Audio: packet ordering disabled audioType=${format.audioType}")
+                    }
+                }
+            }
+        }
+    }
+
     private fun handle(packet: AudioPacket) {
         val rtp = packet.rtp
         val timestampUs = sampleTimestampUs(packet.sample)
@@ -1407,7 +1605,9 @@ private class AudioRenderer(
             "estimatedQueuedFrames=${queuedFrames ?: -1} writeErrors=$writeErrorsThisWindow " +
             "lastWriteError=${lastWriteErrorCode ?: "none"} zeroWrites=$zeroWritesThisWindow " +
             "partialWrites=$partialWritesThisWindow " +
-            "decoderDroppedTotal=$inputDropped outputBuffersTotal=$outputBuffers rebuffers=$rebufferCount ended=$force"
+            "decoderDroppedTotal=$inputDropped outputBuffersTotal=$outputBuffers rebuffers=$rebufferCount " +
+            "held=${pending.size} heldMax=$maxHeldThisWindow stale=$staleDroppedTotal gaveUp=$gaveUpTotal " +
+            "orderOn=$orderingActive orderStep=${expectedStepSamples ?: -1} ended=$force"
         Log.i(STATS_TAG, line)
         report(line)
         if (format.codec != AudioCodecKind.LPCM) {
@@ -1426,6 +1626,7 @@ private class AudioRenderer(
         lastWriteErrorCode = null
         zeroWritesThisWindow = 0
         partialWritesThisWindow = 0
+        maxHeldThisWindow = pending.size
         statsWindowStartNs = now
     }
 
@@ -1505,6 +1706,16 @@ private class AudioRenderer(
         const val BUFFER_TAIL_WAIT_NS = 500_000_000L
         // Holds a burst after a Wi-Fi gap (~4 s of AAC) instead of dropping it.
         const val MAX_QUEUED_PACKETS = 192
+
+        // Samples between consecutive RTP timestamps: AAC-LC and Opus both carry 1024 in CarPlay.
+        const val INITIAL_STEP_SAMPLES = 1024L
+
+        // Longest a newer packet waits for the one it jumped ahead of. A reordering event clears
+        // inside the same delivery burst; a packet that never arrives must not stall the stream.
+        const val REORDER_WAIT_NS = 100_000_000L
+
+        // Holds with nothing to fill them, back to back, mean the frame size never matched.
+        const val MAX_CONSECUTIVE_GIVE_UPS = 5
         const val PREBUFFER_WRITE_CHUNK_BYTES = 2 * 1024
         const val STATS_TAG = "DiPlay-AudioStats"
         const val STATS_WINDOW_NS = 5_000_000_000L
